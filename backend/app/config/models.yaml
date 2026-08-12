@@ -1,0 +1,85 @@
+# Optiq model registry — add models here without code changes.
+# Pricing is USD per 1M tokens (input / output). Ollama models are free (null pricing).
+
+providers:
+  openai:
+    adapter: openai
+    requires_api_key: true
+    enabled: true
+    models:
+      gpt-4o:
+        display_name: GPT-4o
+        enabled: true
+        default_temperature: 0.7
+        max_tokens: 4096
+        pricing:
+          input_per_1m: 2.50
+          output_per_1m: 10.00
+      gpt-4o-mini:
+        display_name: GPT-4o Mini
+        enabled: true
+        default_temperature: 0.7
+        max_tokens: 4096
+        pricing:
+          input_per_1m: 0.15
+          output_per_1m: 0.60
+
+  ollama:
+    adapter: ollama
+    requires_api_key: false
+    enabled: true
+    models:
+      llama3.2:
+        display_name: Llama 3.2
+        enabled: true
+        default_temperature: 0.7
+        max_tokens: 4096
+        pricing: null
+      mistral:
+        display_name: Mistral
+        enabled: true
+        default_temperature: 0.7
+        max_tokens: 4096
+        pricing: null
+      qwen2.5:
+        display_name: Qwen 2.5
+        enabled: true
+        default_temperature: 0.7
+        max_tokens: 4096
+        pricing: null
+
+  anthropic:
+    adapter: anthropic
+    requires_api_key: true
+    enabled: false  # Wire adapter in Phase 1 Week 2
+    models:
+      claude-sonnet-4-20250514:
+        display_name: Claude Sonnet 4
+        enabled: false
+        default_temperature: 0.7
+        max_tokens: 4096
+        pricing:
+          input_per_1m: 3.00
+          output_per_1m: 15.00
+      claude-opus-4-20250514:
+        display_name: Claude Opus 4
+        enabled: false
+        default_temperature: 0.7
+        max_tokens: 4096
+        pricing:
+          input_per_1m: 15.00
+          output_per_1m: 75.00
+
+  google:
+    adapter: gemini
+    requires_api_key: true
+    enabled: false  # Wire adapter in Phase 1 Week 2
+    models:
+      gemini-2.0-flash:
+        display_name: Gemini 2.0 Flash
+        enabled: false
+        default_temperature: 0.7
+        max_tokens: 4096
+        pricing:
+          input_per_1m: 0.10
+          output_per_1m: 0.40
