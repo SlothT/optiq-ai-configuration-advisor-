@@ -3,10 +3,12 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException, Response, status
 from sqlalchemy.orm import Session
 
-from app.config.model_registry import list_models, provider_requires_api_key
+from app.adapters.ollama_adapter import normalize_ollama_base_url
+from app.config.model_registry import provider_requires_api_key
+from app.core.config import settings
 from app.core.crypto import encrypt_text
 from app.core.deps import db_session, get_current_user, get_project_for_user
-from app.models.domain import Project, ProviderKey, User
+from app.models.domain import ProviderKey, User
 from app.schemas.domain import ProviderUpsertRequest, ProviderView
 from app.services.phase1 import list_project_provider_views
 
@@ -48,26 +50,23 @@ def upsert_provider(
         db.add(existing)
 
     existing.encrypted_api_key = encrypt_text(request.api_key) if request.api_key else None
-    existing.ollama_base_url = request.ollama_base_url.strip() if request.ollama_base_url else None
+    if request.provider_name == "ollama":
+        existing.ollama_base_url = normalize_ollama_base_url(
+            request.ollama_base_url or settings.ollama_base_url,
+            settings.ollama_base_url,
+        )
+    else:
+        existing.ollama_base_url = request.ollama_base_url.strip() if request.ollama_base_url else None
     db.commit()
     db.refresh(existing)
-    return {
+    views = list_project_provider_views(db, project_id)
+    saved = next((item for item in views if item["provider_name"] == existing.provider_name), None)
+    return saved or {
         "provider_name": existing.provider_name,
         "configured": True,
         "has_api_key": bool(existing.encrypted_api_key),
         "ollama_base_url": existing.ollama_base_url,
-        "available_models": [
-            {
-                "id": model.id,
-                "display_name": model.display_name,
-                "default_temperature": model.default_temperature,
-                "max_tokens": model.max_tokens,
-                "pricing": None
-                if not model.pricing
-                else {"input_per_1m": model.pricing.input_per_1m, "output_per_1m": model.pricing.output_per_1m},
-            }
-            for model in list_models(provider=request.provider_name, include_disabled=False)
-        ],
+        "available_models": [],
     }
 
 

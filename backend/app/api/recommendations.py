@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
 from app.core.deps import db_session, get_current_user, get_project_for_user
-from app.models.domain import Experiment, Recommendation, User
+from app.models.domain import Experiment, User
 from app.schemas.domain import RecommendationRequest, RecommendationResponse
 from app.services.phase1 import persist_recommendation, score_recommendations
 
@@ -44,8 +44,11 @@ def recommend_model(
     if not rows:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Experiment has no result rows")
 
+    successful_rows = [row for row in rows if not row.get("error")]
+    failed_rows = [row for row in rows if row.get("error")]
+
     grouped: dict[tuple[str, str], list[dict]] = defaultdict(list)
-    for row in rows:
+    for row in successful_rows:
         grouped[(row["model_id"], row["prompt_id"])].append(row)
 
     options: list[dict] = []
@@ -58,22 +61,60 @@ def recommend_model(
             "prompt_id": prompt_id,
             "quality_score": round(sum(quality_values) / len(quality_values), 2),
             "cost_usd": round(sum(cost_values) / len(cost_values), 6),
+            "cost_is_local": all(row.get("cost_is_local") or row.get("provider") == "ollama" for row in group_rows),
             "latency_ms": round(sum(latency_values) / len(latency_values), 2),
             "structured_output": any(str(row.get("raw_output", "")).strip().startswith("{") for row in group_rows),
+            "failed": False,
         }
         options.append(option)
+
+    excluded_failed = []
+    failed_grouped: dict[str, list[dict]] = defaultdict(list)
+    for row in failed_rows:
+        failed_grouped[str(row.get("model_id"))].append(row)
+    for model_id, group_rows in failed_grouped.items():
+        excluded_failed.append(
+            {
+                "model_id": model_id,
+                "reasons": [f"generation failed: {group_rows[0].get('error')}"],
+                "failed": True,
+            }
+        )
+
+    if not options:
+        justification = (
+            "No successful model runs in this experiment. Recommendations need at least one "
+            "completed generation without errors. Fix the Experiment Runner failures and try again."
+        )
+        recommendation = persist_recommendation(
+            db,
+            project_id=request.project_id,
+            experiment_id=experiment.id,
+            request_payload=request.model_dump(),
+            recommended_config={"model_id": None, "usable": False},
+            excluded_options=excluded_failed,
+            ranked_options=[],
+            justification=justification,
+        )
+        db.commit()
+        return {
+            "id": recommendation.id,
+            "project_id": recommendation.project_id,
+            "experiment_id": recommendation.experiment_id,
+            "recommended_config": recommendation.recommended_config,
+            "ranked_options": recommendation.ranked_options,
+            "excluded_options": recommendation.excluded_options,
+            "justification": recommendation.justification,
+        }
 
     ranked, excluded, top, justification = score_recommendations(
         options,
         {
             "goal": request.goal,
-            "max_cost": request.max_cost,
-            "max_latency_ms": request.max_latency_ms,
-            "min_quality_score": request.min_quality_score,
-            "requires_structured_json": request.requires_structured_json,
             "weights": request.weights,
         },
     )
+    excluded = excluded_failed + excluded
     recommendation = persist_recommendation(
         db,
         project_id=request.project_id,

@@ -15,6 +15,7 @@ cryptography==44.0.0
 pyyaml==6.0.2
 tiktoken==0.8.0
 ragas==0.2.10
+email-validator==2.2.0
 
 # Dev / CI
 ruff==0.8.4

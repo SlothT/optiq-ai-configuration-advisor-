@@ -21,11 +21,17 @@ export default function SettingsPage() {
         setToken(storedToken);
     }, []);
 
+    const applyOllamaUrlFromProviders = useCallback((data: ProviderView[]) => {
+        const ollama = data.find((provider) => provider.provider_name === "ollama");
+        setOllamaBaseUrl(ollama?.ollama_base_url ?? "");
+    }, []);
+
     // eslint-disable-next-line react-hooks/exhaustive-deps
     const loadProviders = useCallback(async (activeToken: string, projectId: string) => {
         const data = (await apiFetch(`/api/v1/projects/${projectId}/providers`, { token: activeToken })) as ProviderView[];
         setProviders(data);
-    }, []);
+        applyOllamaUrlFromProviders(data);
+    }, [applyOllamaUrlFromProviders]);
 
     const loadProjects = useCallback(async (activeToken: string) => {
         const data = (await apiFetch("/api/v1/projects", { token: activeToken })) as Project[];
@@ -44,40 +50,57 @@ export default function SettingsPage() {
     }, [token, loadProjects]);
 
     async function createProject() {
-        if (!token || !projectName.trim()) {
+        if (!token) {
+            setMessage("Sign in first.");
             return;
         }
-        const created = (await apiFetch("/api/v1/projects", {
-            token,
-            method: "POST",
-            body: JSON.stringify({ name: projectName, description: "Phase 1 workspace" }),
-            headers: { "Content-Type": "application/json" },
-        })) as Project;
-        setProjects((current) => [created, ...current]);
-        setSelectedProjectId(created.id);
-        setProjectName("");
-        await loadProviders(token, created.id);
-        setMessage(`Created project ${created.name}.`);
+        if (!projectName.trim()) {
+            setMessage("Enter a project name, then click Create project.");
+            return;
+        }
+        try {
+            const created = (await apiFetch("/api/v1/projects", {
+                token,
+                method: "POST",
+                body: JSON.stringify({ name: projectName, description: "Phase 1 workspace" }),
+                headers: { "Content-Type": "application/json" },
+            })) as Project;
+            setProjects((current) => [created, ...current]);
+            setSelectedProjectId(created.id);
+            setProjectName("");
+            await loadProviders(token, created.id);
+            setMessage(`Created project ${created.name}. You can save a provider now.`);
+        } catch (error) {
+            setMessage(error instanceof Error ? error.message : "Could not create project.");
+        }
     }
 
     async function saveProvider() {
-        if (!token || !selectedProjectId) {
+        if (!token) {
+            setMessage("Sign in first.");
             return;
         }
-        await apiFetch(`/api/v1/projects/${selectedProjectId}/providers`, {
-            token,
-            method: "POST",
-            body: JSON.stringify({
-                provider_name: providerName,
-                api_key: apiKey || null,
-                ollama_base_url: ollamaBaseUrl || null,
-            }),
-            headers: { "Content-Type": "application/json" },
-        });
-        await loadProviders(token, selectedProjectId);
-        setApiKey("");
-        setOllamaBaseUrl("");
-        setMessage(`Saved ${providerName} provider settings.`);
+        if (!selectedProjectId) {
+            setMessage("Create or select a project first, then save the provider.");
+            return;
+        }
+        try {
+            await apiFetch(`/api/v1/projects/${selectedProjectId}/providers`, {
+                token,
+                method: "POST",
+                body: JSON.stringify({
+                    provider_name: providerName,
+                    api_key: apiKey || null,
+                    ollama_base_url: ollamaBaseUrl || null,
+                }),
+                headers: { "Content-Type": "application/json" },
+            });
+            await loadProviders(token, selectedProjectId);
+            setApiKey("");
+            setMessage(`Saved ${providerName} provider settings.`);
+        } catch (error) {
+            setMessage(error instanceof Error ? error.message : "Could not save provider.");
+        }
     }
 
     const providerCards = useMemo(() => providers, [providers]);
@@ -85,8 +108,7 @@ export default function SettingsPage() {
     return (
         <section className="grid gap-6 lg:grid-cols-[0.95fr_1.05fr]">
             <div className="rounded-[2rem] border border-black/5 bg-white/85 p-8 shadow-panel">
-                <p className="text-sm uppercase tracking-[0.24em] text-accent">Screen 5</p>
-                <h2 className="mt-2 text-3xl font-semibold">Settings</h2>
+                <h2 className="text-3xl font-semibold">Settings</h2>
                 <p className="mt-3 text-sm text-ink/70">Create a project and store provider credentials for the current browser session.</p>
 
                 <div className="mt-6 grid gap-4">
@@ -143,11 +165,17 @@ export default function SettingsPage() {
                         </label>
                         <label className="grid gap-2 text-sm font-medium">
                             Ollama base URL
-                            <input className="rounded-2xl border border-black/10 px-4 py-3" value={ollamaBaseUrl} onChange={(event) => setOllamaBaseUrl(event.target.value)} />
+                            <input
+                                className="rounded-2xl border border-black/10 px-4 py-3"
+                                placeholder="http://localhost:11434"
+                                value={ollamaBaseUrl}
+                                onChange={(event) => setOllamaBaseUrl(event.target.value)}
+                            />
                         </label>
-                        <button className="rounded-full bg-accent px-5 py-3 text-sm font-medium text-white" onClick={saveProvider} type="button">
+                        <button className="rounded-full bg-accent px-5 py-3 text-sm font-medium text-white disabled:opacity-60" disabled={!selectedProjectId} onClick={saveProvider} type="button">
                             Save provider
                         </button>
+                        {!selectedProjectId ? <p className="text-sm text-ink/60">Create a project on the left before saving a provider.</p> : null}
                     </div>
                 </div>
 
@@ -163,6 +191,10 @@ export default function SettingsPage() {
                                 <p className="mt-2 text-sm text-ink/70">
                                     Models: {provider.available_models.map((model) => model.display_name).join(", ") || "None available"}
                                 </p>
+                                {provider.provider_name === "ollama" && provider.ollama_base_url ? (
+                                    <p className="mt-2 text-sm text-ink/70">Base URL: {provider.ollama_base_url}</p>
+                                ) : null}
+                                {provider.status_message ? <p className="mt-2 text-sm text-red-700">{provider.status_message}</p> : null}
                             </div>
                         ))}
                         {!providerCards.length ? <p className="text-sm text-ink/70">Select a project to see provider status.</p> : null}

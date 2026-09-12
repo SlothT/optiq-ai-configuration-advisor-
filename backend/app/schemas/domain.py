@@ -3,7 +3,8 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from email_validator import EmailNotValidError, validate_email
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class TokenResponse(BaseModel):
@@ -16,6 +17,7 @@ class UserRead(BaseModel):
 
     id: str
     email: str
+    email_verified: bool = False
     created_at: datetime | None = None
 
 
@@ -23,10 +25,56 @@ class RegisterRequest(BaseModel):
     email: str
     password: str = Field(min_length=8)
 
+    @field_validator("email")
+    @classmethod
+    def validate_email_format(cls, value: str) -> str:
+        try:
+            result = validate_email(value, check_deliverability=False)
+        except EmailNotValidError as exc:
+            raise ValueError("Enter a valid email address") from exc
+        return str(result.normalized).lower()
+
+
+class RegisterResponse(BaseModel):
+    id: str
+    email: str
+    email_verified: bool
+    message: str
+
 
 class LoginRequest(BaseModel):
     email: str
     password: str
+
+    @field_validator("email")
+    @classmethod
+    def validate_email_format(cls, value: str) -> str:
+        try:
+            result = validate_email(value, check_deliverability=False)
+        except EmailNotValidError as orig:
+            raise ValueError("Enter a valid email address") from orig
+        return str(result.normalized).lower()
+
+
+class VerifyEmailRequest(BaseModel):
+    token: str
+
+
+class ResendVerificationRequest(BaseModel):
+    email: str
+
+    @field_validator("email")
+    @classmethod
+    def validate_email_format(cls, value: str) -> str:
+        try:
+            result = validate_email(value, check_deliverability=False)
+        except EmailNotValidError as orig:
+            raise ValueError("Enter a valid email address") from orig
+        return str(result.normalized).lower()
+
+
+class GoogleAuthRequest(BaseModel):
+    id_token: str
 
 
 class ProjectCreateRequest(BaseModel):
@@ -55,6 +103,7 @@ class ProviderView(BaseModel):
     has_api_key: bool = False
     ollama_base_url: str | None = None
     available_models: list[dict[str, Any]] = Field(default_factory=list)
+    status_message: str | None = None
 
 
 class PromptAnalyzeResponse(BaseModel):
@@ -66,6 +115,7 @@ class PromptAnalyzeResponse(BaseModel):
     suggested_improvements: list[str]
     estimated_tokens: int
     estimated_cost_usd: float
+    cost_is_local: bool = False
     judge_model: str | None = None
     analysis_json: dict[str, Any]
 
@@ -76,6 +126,13 @@ class ExperimentTestInput(BaseModel):
     context: str | None = None
 
 
+class ExperimentEstimateRequest(BaseModel):
+    project_id: str
+    prompt_ids: list[str]
+    model_ids: list[str]
+    test_inputs: list[ExperimentTestInput] = Field(default_factory=list)
+
+
 class ExperimentRunRequest(BaseModel):
     project_id: str
     prompt_ids: list[str]
@@ -84,6 +141,7 @@ class ExperimentRunRequest(BaseModel):
     test_inputs: list[ExperimentTestInput] = Field(default_factory=list)
     confirm_cost: bool = False
     temperature: float | None = None
+    label: str | None = None
 
 
 class ExperimentRow(BaseModel):

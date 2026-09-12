@@ -5,20 +5,28 @@ from app.api.auth import router as auth_router
 from app.api.experiments import router as experiments_router
 from app.api.health import router as health_router
 from app.api.projects import router as projects_router
-from app.api.providers import router as providers_router
 from app.api.prompts import router as prompts_router
+from app.api.providers import router as providers_router
 from app.api.recommendations import router as recommendations_router
 from app.core.config import settings
 
 app = FastAPI(
     title=settings.app_name,
     description="AI Configuration Advisor API",
-    version="0.1.0",
+    version="0.2.0",
 )
+
+allowed_origins = {
+    settings.frontend_url,
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+    "http://localhost:3001",
+    "http://127.0.0.1:3001",
+}
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[settings.frontend_url, "http://localhost:3000"],
+    allow_origins=sorted(origin for origin in allowed_origins if origin),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
