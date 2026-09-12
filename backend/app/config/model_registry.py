@@ -87,6 +87,51 @@ def get_model(model_id: str) -> ModelInfo | None:
     return None
 
 
+def resolve_model_info(model_id: str) -> ModelInfo | None:
+    found = get_model(model_id)
+    if found:
+        return found
+    short = model_id.split(":", 1)[0]
+    if short == model_id:
+        return None
+    found = get_model(short)
+    if not found:
+        return None
+    return ModelInfo(
+        id=model_id,
+        provider=found.provider,
+        adapter=found.adapter,
+        display_name=found.display_name,
+        pricing=found.pricing,
+        default_temperature=found.default_temperature,
+        max_tokens=found.max_tokens,
+        enabled=found.enabled,
+    )
+
+
+def synthetic_ollama_model(model_id: str) -> ModelInfo:
+    resolved = resolve_model_info(model_id)
+    if resolved and resolved.provider == "ollama":
+        return resolved
+    return ModelInfo(
+        id=model_id,
+        provider="ollama",
+        adapter="ollama",
+        display_name=model_id,
+        pricing=None,
+        default_temperature=0.7,
+        max_tokens=4096,
+        enabled=True,
+    )
+
+
+def model_is_local(model_id: str) -> bool:
+    model = resolve_model_info(model_id)
+    if model is None:
+        return False
+    return model.pricing is None
+
+
 def get_provider_config(provider_name: str) -> dict[str, Any] | None:
     registry = load_registry()
     return registry.get("providers", {}).get(provider_name)

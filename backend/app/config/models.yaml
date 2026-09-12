@@ -51,11 +51,11 @@ providers:
   anthropic:
     adapter: anthropic
     requires_api_key: true
-    enabled: false  # Wire adapter in Phase 1 Week 2
+    enabled: true
     models:
       claude-sonnet-4-20250514:
         display_name: Claude Sonnet 4
-        enabled: false
+        enabled: true
         default_temperature: 0.7
         max_tokens: 4096
         pricing:
@@ -63,7 +63,7 @@ providers:
           output_per_1m: 15.00
       claude-opus-4-20250514:
         display_name: Claude Opus 4
-        enabled: false
+        enabled: true
         default_temperature: 0.7
         max_tokens: 4096
         pricing:
@@ -73,11 +73,11 @@ providers:
   google:
     adapter: gemini
     requires_api_key: true
-    enabled: false  # Wire adapter in Phase 1 Week 2
+    enabled: true
     models:
       gemini-2.0-flash:
         display_name: Gemini 2.0 Flash
-        enabled: false
+        enabled: true
         default_temperature: 0.7
         max_tokens: 4096
         pricing:

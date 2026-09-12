@@ -2,26 +2,24 @@ from __future__ import annotations
 
 import csv
 import json
-import math
-import tempfile
 import time
 from dataclasses import dataclass
-from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
-from uuid import uuid4
 
-import httpx
-import mlflow
 import tiktoken
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from app.config.model_registry import get_model, get_provider_config, list_models
+from app.adapters.base import ProviderResolution
+from app.adapters.factory import AdapterFactory, resolve_provider
+from app.adapters.ollama_adapter import list_installed_ollama_models, normalize_ollama_base_url
+from app.config.model_registry import get_model, get_provider_config, list_models, model_is_local, resolve_model_info
 from app.core.config import settings
 from app.core.crypto import decrypt_text
-from app.models.domain import Experiment, Prompt, Project, ProviderKey, Recommendation, User
+from app.models.domain import Experiment, Prompt, ProviderKey, Recommendation
+from app.services.auto import AUTO_MODEL_ID, pick_auto_model
+from app.services.evaluation import aggregate_rows, evaluate_row, per_model_summary
 
 TASK_KEYWORDS = {
     "summarization": ["summary", "summarize", "condense"],
@@ -31,13 +29,10 @@ TASK_KEYWORDS = {
     "open_ended": [],
 }
 
-
-@dataclass(frozen=True)
-class ProviderResolution:
-    provider_name: str
-    model_id: str
-    provider_key: ProviderKey | None
-    model_config: Any
+CONTEXT_MARKER = "--- Context from uploaded files ---"
+MAX_CONTEXT_FILE_BYTES = 200_000
+MAX_CONTEXT_TOTAL_BYTES = 1_048_576
+ALLOWED_CONTEXT_SUFFIXES = {".md", ".markdown", ".txt", ".csv", ".json", ".yml", ".yaml"}
 
 
 @dataclass(frozen=True)
@@ -56,6 +51,7 @@ class PromptAnalysis:
 class ExperimentRunResult:
     rows: list[dict[str, Any]]
     summary: dict[str, Any]
+    prompts: list[Prompt]
 
 
 
@@ -72,7 +68,7 @@ def estimate_tokens(text: str, model_id: str | None = None) -> int:
 
 
 def estimate_cost(model_id: str, input_tokens: int, output_tokens: int) -> float:
-    model = get_model(model_id)
+    model = resolve_model_info(model_id) or get_model(model_id)
     if not model or not model.pricing:
         return 0.0
     input_cost = (input_tokens / 1_000_000) * model.pricing.input_per_1m
@@ -80,12 +76,56 @@ def estimate_cost(model_id: str, input_tokens: int, output_tokens: int) -> float
     return round(input_cost + output_cost, 6)
 
 
+def compose_prompt_with_context(
+    user_prompt: str,
+    attachments: list[tuple[str | None, bytes]],
+) -> tuple[str, str, dict[str, Any]]:
+    user_prompt = (user_prompt or "").strip()
+    skipped: list[str] = []
+    included: list[str] = []
+    parts: list[str] = []
+    total_bytes = 0
+
+    for file_name, raw_bytes in attachments:
+        name = (file_name or "upload").strip() or "upload"
+        suffix = Path(name).suffix.lower()
+        if suffix not in ALLOWED_CONTEXT_SUFFIXES:
+            skipped.append(f"{name}: unsupported type")
+            continue
+        if len(raw_bytes) > MAX_CONTEXT_FILE_BYTES:
+            skipped.append(f"{name}: larger than 200KB")
+            continue
+        if total_bytes + len(raw_bytes) > MAX_CONTEXT_TOTAL_BYTES:
+            skipped.append(f"{name}: skipped because total upload size exceeds 1MB")
+            continue
+        try:
+            decoded = raw_bytes.decode("utf-8")
+        except UnicodeDecodeError:
+            skipped.append(f"{name}: not valid UTF-8 text")
+            continue
+        total_bytes += len(raw_bytes)
+        included.append(name)
+        parts.append(f"### {name}\n{decoded.strip()}")
+
+    context_text = "\n\n".join(parts)
+    if context_text:
+        composed = f"{user_prompt}\n\n{CONTEXT_MARKER}\n{context_text}".strip()
+    else:
+        composed = user_prompt
+    meta = {
+        "context_files": included,
+        "skipped_files": skipped,
+        "prompt_chars": len(user_prompt),
+        "context_chars": len(context_text),
+    }
+    return composed, context_text, meta
+
+
 def _prompt_family_version(db: Session, project_id: str, source_prompt_id: str | None) -> int:
     if source_prompt_id:
         source = db.query(Prompt).filter(Prompt.id == source_prompt_id, Prompt.project_id == project_id).one_or_none()
         if not source:
             raise ValueError("Prompt not found for re-analysis")
-        return source.version + 1
     latest = (
         db.query(func.max(Prompt.version))
         .filter(Prompt.project_id == project_id)
@@ -94,12 +134,17 @@ def _prompt_family_version(db: Session, project_id: str, source_prompt_id: str |
     return int(latest or 0) + 1
 
 
-def analyze_prompt_text(prompt_text: str, task_type: str) -> tuple[float, list[str], list[str], list[str]]:
+def analyze_prompt_text(
+    prompt_text: str,
+    task_type: str,
+    context_text: str = "",
+) -> tuple[float, list[str], list[str], list[str]]:
     normalized = normalize_whitespace(prompt_text)
     strengths: list[str] = []
     weaknesses: list[str] = []
     suggestions: list[str] = []
     score = 100.0
+    has_context = bool(context_text.strip())
 
     word_count = len(normalized.split())
     if word_count >= 75:
@@ -108,6 +153,9 @@ def analyze_prompt_text(prompt_text: str, task_type: str) -> tuple[float, list[s
         weaknesses.append("Prompt is very short and may be underspecified")
         suggestions.append("Add task context, constraints, and an explicit output target")
         score -= 15
+        if has_context:
+            suggestions.append("Say how the model should use the attached documents")
+            score += 8
 
     if any(symbol in prompt_text for symbol in ["```", "<", ">", "::"]):
         strengths.append("Uses structured delimiters or formatting hints")
@@ -139,6 +187,9 @@ def analyze_prompt_text(prompt_text: str, task_type: str) -> tuple[float, list[s
         suggestions.append("Trim the prompt or split instructions from background context")
         score -= 5
 
+    if has_context:
+        strengths.append("Supporting documents were attached as context")
+
     if not strengths:
         strengths.append("Prompt is readable and can be evaluated automatically")
 
@@ -147,105 +198,71 @@ def analyze_prompt_text(prompt_text: str, task_type: str) -> tuple[float, list[s
 
 
 def _provider_key_for_model(db: Session, project_id: str, model_id: str) -> ProviderResolution:
-    model = get_model(model_id)
-    if not model:
-        raise ValueError(f"Model '{model_id}' is not enabled or does not exist")
+    return resolve_provider(db, project_id, model_id)
 
-    provider_key = (
-        db.query(ProviderKey)
-        .filter(ProviderKey.project_id == project_id, ProviderKey.provider_name == model.provider)
-        .one_or_none()
-    )
-    return ProviderResolution(provider_name=model.provider, model_id=model.id, provider_key=provider_key, model_config=model)
+
+def _extract_json_object(text: str) -> dict[str, Any] | None:
+    stripped = text.strip()
+    if stripped.startswith("```"):
+        stripped = stripped.strip("`")
+        if stripped.lower().startswith("json"):
+            stripped = stripped[4:].strip()
+    start = stripped.find("{")
+    end = stripped.rfind("}")
+    if start < 0 or end <= start:
+        return None
+    try:
+        payload = json.loads(stripped[start : end + 1])
+    except json.JSONDecodeError:
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _string_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item).strip() for item in value if str(item).strip()]
 
 
 def _resolve_prompt_text(file_name: str | None, raw_bytes: bytes, provided_text: str | None) -> str:
-    if provided_text:
-        return provided_text.strip()
-
-    text = raw_bytes.decode("utf-8")
-    suffix = Path(file_name or "").suffix.lower()
-    if suffix == ".json":
-        payload = json.loads(text)
-        if isinstance(payload, list):
-            first = payload[0] if payload else {}
-            if isinstance(first, dict):
-                return str(first.get("prompt") or first.get("text") or first)
-            return str(first)
-        if isinstance(payload, dict):
-            return str(payload.get("prompt") or payload.get("text") or payload)
-        return str(payload)
-    if suffix == ".csv":
-        rows = list(csv.DictReader(text.splitlines()))
-        if rows:
-            row = rows[0]
-            return str(row.get("prompt") or row.get("text") or row)
-        return text
-    return text
-
-
-def _call_openai_chat(api_key: str, model_id: str, prompt_text: str, temperature: float = 0.2) -> str:
-    response = httpx.post(
-        "https://api.openai.com/v1/chat/completions",
-        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-        json={
-            "model": model_id,
-            "messages": [
-                {"role": "system", "content": "You are a concise prompt quality judge."},
-                {"role": "user", "content": prompt_text},
-            ],
-            "temperature": temperature,
-        },
-        timeout=30.0,
-    )
-    response.raise_for_status()
-    payload = response.json()
-    return payload["choices"][0]["message"]["content"]
+    if raw_bytes:
+        text = raw_bytes.decode("utf-8")
+        suffix = Path(file_name or "").suffix.lower()
+        if suffix == ".json":
+            payload = json.loads(text)
+            if isinstance(payload, list):
+                first = payload[0] if payload else {}
+                if isinstance(first, dict):
+                    return str(first.get("prompt") or first.get("text") or first)
+                return str(first)
+            if isinstance(payload, dict):
+                return str(payload.get("prompt") or payload.get("text") or payload)
+            return str(payload)
+        if suffix == ".csv":
+            rows = list(csv.DictReader(text.splitlines()))
+            if rows:
+                row = rows[0]
+                return str(row.get("prompt") or row.get("text") or row)
+            return text.strip()
+        return text.strip()
+    return (provided_text or "").strip()
 
 
-def _call_ollama_chat(base_url: str, model_id: str, prompt_text: str) -> str:
-    base = base_url.rstrip("/")
-    response = httpx.post(
-        f"{base}/api/chat",
-        json={
-            "model": model_id,
-            "messages": [
-                {"role": "system", "content": "You are a concise prompt quality judge."},
-                {"role": "user", "content": prompt_text},
-            ],
-            "stream": False,
-        },
-        timeout=60.0,
-    )
-    response.raise_for_status()
-    payload = response.json()
-    message = payload.get("message") or {}
-    return str(message.get("content") or payload.get("response") or "")
-
-
-def _judge_prompt_with_model(db: Session, project_id: str, judge_model: str, prompt_text: str) -> tuple[str | None, str | None]:
+def _judge_prompt_with_model(db: Session, project_id: str, judge_model: str, prompt_text: str) -> tuple[str | None, str | None, str | None]:
     try:
-        resolution = _provider_key_for_model(db, project_id, judge_model)
-    except ValueError:
-        return None, "fallback"
-
-    if not resolution.provider_key:
-        return None, "fallback"
-
-    provider = resolution.provider_name
-    try:
-        if provider == "openai":
-            api_key = decrypt_text(resolution.provider_key.encrypted_api_key or "")
-            judge_output = _call_openai_chat(api_key, judge_model, prompt_text)
-            return judge_output, None
-        if provider == "ollama":
-            if not resolution.provider_key.ollama_base_url:
-                return None, "fallback"
-            judge_output = _call_ollama_chat(resolution.provider_key.ollama_base_url, judge_model, prompt_text)
-            return judge_output, None
-    except Exception:
-        return None, "fallback"
-    return None, "fallback"
+        resolved_model = pick_auto_model(db, project_id) if judge_model.lower() == AUTO_MODEL_ID else judge_model
+        resolution = _provider_key_for_model(db, project_id, resolved_model)
+        adapter = AdapterFactory.from_resolution(resolution)
+        result = adapter.generate(
+            model_id=resolved_model,
+            prompt=prompt_text,
+            temperature=0.2,
+            max_tokens=512,
+            system="You are a concise prompt quality judge.",
+        )
+        return result.text, resolved_model, None
+    except Exception as exc:
+        return None, "fallback", str(exc)
 
 
 def analyze_prompt(
@@ -256,20 +273,49 @@ def analyze_prompt(
     prompt_text: str,
     judge_model: str,
     source_prompt_id: str | None = None,
+    user_prompt: str | None = None,
+    context_text: str = "",
+    context_meta: dict[str, Any] | None = None,
 ) -> tuple[Prompt, PromptAnalysis]:
     version = _prompt_family_version(db, project_id, source_prompt_id)
-    base_score, strengths, weaknesses, suggestions = analyze_prompt_text(prompt_text, task_type)
-    token_count = estimate_tokens(prompt_text, judge_model)
-    estimated_cost = estimate_cost(judge_model, token_count, 256)
+    scored_prompt = (user_prompt or prompt_text).strip()
+    base_score, strengths, weaknesses, suggestions = analyze_prompt_text(scored_prompt, task_type, context_text)
+    cost_model = judge_model
+    if judge_model.lower() == AUTO_MODEL_ID:
+        try:
+            cost_model = pick_auto_model(db, project_id)
+        except Exception:
+            cost_model = judge_model
+    prompt_tokens = estimate_tokens(scored_prompt, cost_model)
+    context_tokens = estimate_tokens(context_text, cost_model) if context_text else 0
+    token_count = estimate_tokens(prompt_text, cost_model)
+    estimated_cost = estimate_cost(cost_model, token_count, 256)
+    cost_local = model_is_local(cost_model)
 
     judge_prompt = (
-        "Evaluate the following prompt for clarity, structure, edge cases, and failure behavior. "
-        "Return concise improvement advice.\n\n"
+        "Evaluate the following user prompt for clarity, structure, edge cases, and failure behavior. "
+        "If context documents are attached, judge whether the prompt uses that context well. "
+        "Return JSON only with keys quality_score (0-100), strengths, weaknesses, "
+        "and suggested_improvements (specific, actionable strings).\n\n"
         f"Task type: {task_type}\n\nPrompt:\n{prompt_text}"
     )
-    judge_output, mode = _judge_prompt_with_model(db, project_id, judge_model, judge_prompt)
+    judge_output, mode, judge_error = _judge_prompt_with_model(db, project_id, judge_model, judge_prompt)
+    resolved_judge = cost_model if mode == "fallback" else (mode or cost_model)
+    analysis_mode = "fallback"
     if judge_output:
-        suggestions = list(dict.fromkeys(suggestions + [f"Judge feedback: {judge_output[:240].strip()}"]))
+        analysis_mode = "live"
+        parsed = _extract_json_object(judge_output)
+        if parsed:
+            judge_score = parsed.get("quality_score")
+            if isinstance(judge_score, int | float):
+                base_score = round((base_score + max(0.0, min(100.0, float(judge_score)))) / 2, 1)
+            strengths = list(dict.fromkeys(strengths + _string_list(parsed.get("strengths"))))
+            weaknesses = list(dict.fromkeys(weaknesses + _string_list(parsed.get("weaknesses"))))
+            judge_suggestions = _string_list(parsed.get("suggested_improvements"))
+            suggestions = list(dict.fromkeys(suggestions + judge_suggestions))
+        else:
+            snippet = judge_output[:240].strip()
+            suggestions = list(dict.fromkeys(suggestions + [f"Judge feedback: {snippet}"]))
         strengths.append("Judge model was available for live feedback")
         base_score = min(100.0, base_score + 5.0)
     elif mode == "fallback":
@@ -282,13 +328,20 @@ def analyze_prompt(
         suggested_improvements=list(dict.fromkeys(suggestions)),
         analysis_json={
             "task_type": task_type,
-            "judge_model": judge_model,
+            "judge_model": resolved_judge,
+            "requested_judge_model": judge_model,
             "judge_output": judge_output,
-            "analysis_mode": "live" if judge_output else "fallback",
+            "judge_error": judge_error,
+            "analysis_mode": analysis_mode,
+            "cost_is_local": cost_local,
+            "cost_model": cost_model,
+            "prompt_tokens": prompt_tokens,
+            "context_tokens": context_tokens,
+            **(context_meta or {}),
         },
         estimated_tokens=token_count,
         estimated_cost_usd=estimated_cost,
-        judge_model=judge_model,
+        judge_model=resolved_judge,
     )
 
     prompt = Prompt(
@@ -300,7 +353,7 @@ def analyze_prompt(
         quality_score=analysis.quality_score,
         estimated_tokens=analysis.estimated_tokens,
         estimated_cost_usd=analysis.estimated_cost_usd,
-        judge_model=judge_model,
+        judge_model=resolved_judge,
         analysis_json=analysis.analysis_json,
     )
     db.add(prompt)
@@ -321,52 +374,47 @@ def _compose_generation_input(prompt_text: str, test_input: dict[str, Any] | Non
     return "\n".join(piece for piece in pieces if piece is not None)
 
 
-def _generate_with_provider(
-    provider: str,
-    provider_key: ProviderKey | None,
-    model_id: str,
-    input_text: str,
-    temperature: float,
-) -> tuple[str, dict[str, Any]]:
-    if provider == "ollama":
-        base_url = (provider_key.ollama_base_url if provider_key else None) or "http://localhost:11434"
-        response = httpx.post(
-            f"{base_url.rstrip('/')}/api/generate",
-            json={"model": model_id, "prompt": input_text, "stream": False, "options": {"temperature": temperature}},
-            timeout=120.0,
-        )
-        response.raise_for_status()
-        payload = response.json()
-        return str(payload.get("response") or ""), payload
-
-    api_key = decrypt_text(provider_key.encrypted_api_key or "") if provider_key and provider_key.encrypted_api_key else ""
-    if provider == "openai":
-        response = httpx.post(
-            "https://api.openai.com/v1/chat/completions",
-            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-            json={
-                "model": model_id,
-                "messages": [
-                    {"role": "system", "content": "Follow the user's instructions exactly."},
-                    {"role": "user", "content": input_text},
-                ],
-                "temperature": temperature,
-            },
-            timeout=120.0,
-        )
-        response.raise_for_status()
-        payload = response.json()
-        return payload["choices"][0]["message"]["content"], payload
-
-    raise ValueError(f"Unsupported provider '{provider}' for live generation")
-
-
-def _row_metric(raw_output: str, reference_answer: str | None) -> tuple[float | None, float | None, float | None]:
-    if reference_answer:
-        similarity = SequenceMatcher(None, normalize_whitespace(raw_output), normalize_whitespace(reference_answer)).ratio()
-        return round(similarity * 100.0, 2), round(similarity * 100.0, 2), None
-    heuristic = analyze_prompt_text(raw_output[:1000], "open_ended")[0]
-    return heuristic, heuristic, None
+def estimate_experiment_cost(
+    db: Session,
+    *,
+    project_id: str,
+    prompt_ids: list[str],
+    model_ids: list[str],
+    test_inputs: list[dict[str, Any]],
+) -> dict[str, Any]:
+    prompts = (
+        db.query(Prompt)
+        .filter(Prompt.project_id == project_id, Prompt.id.in_(prompt_ids))
+        .all()
+    )
+    if len(prompts) != len(prompt_ids):
+        missing = sorted(set(prompt_ids) - {prompt.id for prompt in prompts})
+        raise ValueError(f"Prompt(s) not found: {', '.join(missing)}")
+    cases = test_inputs or [{}]
+    estimated_rows = len(prompts) * len(model_ids) * max(len(cases), 1)
+    total = 0.0
+    breakdown: list[dict[str, Any]] = []
+    for model_id in model_ids:
+        model_cost = 0.0
+        for prompt in prompts:
+            for test_input in cases:
+                generation_input = _compose_generation_input(prompt.raw_text, test_input)
+                input_tokens = estimate_tokens(generation_input, model_id)
+                output_tokens = min(prompt.estimated_tokens or 256, 512)
+                model_cost += estimate_cost(model_id, input_tokens, output_tokens)
+        breakdown.append({
+            "model_id": model_id,
+            "estimated_cost_usd": round(model_cost, 6),
+            "cost_is_local": model_is_local(model_id),
+        })
+        total += model_cost
+    local_only = bool(model_ids) and all(model_is_local(model_id) for model_id in model_ids)
+    return {
+        "estimated_cost_usd": round(total, 6),
+        "estimated_rows": estimated_rows,
+        "breakdown": breakdown,
+        "cost_is_local": local_only,
+    }
 
 
 def run_experiment(
@@ -392,106 +440,69 @@ def run_experiment(
     rows: list[dict[str, Any]] = []
     for model_id in model_ids:
         resolution = _provider_key_for_model(db, project_id, model_id)
-        if resolution.provider_name != "ollama" and not resolution.provider_key:
-            raise ValueError(f"Provider '{resolution.provider_name}' is not configured for model '{model_id}'")
+        adapter = AdapterFactory.from_resolution(resolution)
+        openai_key = None
+        if resolution.provider_name == "openai" and resolution.provider_key and resolution.provider_key.encrypted_api_key:
+            openai_key = decrypt_text(resolution.provider_key.encrypted_api_key)
+        max_tokens = int(getattr(resolution.model_config, "max_tokens", 1024) or 1024)
         for prompt in prompts:
             for index, test_input in enumerate(test_inputs or [{}]):
                 start = time.perf_counter()
                 output_text = ""
                 error_message: str | None = None
-                payload: dict[str, Any] | None = None
+                usage_in: int | None = None
+                usage_out: int | None = None
+                generation_input = _compose_generation_input(prompt.raw_text, test_input)
                 try:
-                    generation_input = _compose_generation_input(prompt.raw_text, test_input)
-                    output_text, payload = _generate_with_provider(
-                        resolution.provider_name,
-                        resolution.provider_key,
-                        model_id,
-                        generation_input,
-                        temperature,
+                    generated = adapter.generate(
+                        model_id=model_id,
+                        prompt=generation_input,
+                        temperature=temperature,
+                        max_tokens=max_tokens,
                     )
+                    output_text = generated.text
+                    usage_in = generated.input_tokens
+                    usage_out = generated.output_tokens
                 except Exception as exc:
                     error_message = str(exc)
                 elapsed_ms = (time.perf_counter() - start) * 1000.0
-                input_tokens = estimate_tokens(_compose_generation_input(prompt.raw_text, test_input), model_id)
-                output_tokens = estimate_tokens(output_text or error_message or "", model_id)
-                cost_usd = estimate_cost(model_id, input_tokens, output_tokens)
-                quality_score, answer_relevancy, faithfulness = _row_metric(output_text, test_input.get("reference_answer"))
-                accuracy = answer_relevancy if test_input.get("reference_answer") else None
+                input_tokens = usage_in if usage_in is not None else estimate_tokens(generation_input, model_id)
+                output_tokens = usage_out if usage_out is not None else estimate_tokens(output_text or error_message or "", model_id)
+                cost_usd = adapter.estimate_cost(model_id, input_tokens, output_tokens)
+                metrics = (
+                    evaluate_row(
+                        prompt_text=prompt.raw_text,
+                        test_input=test_input or {},
+                        output_text=output_text,
+                        task_type=task_type or prompt.task_type,
+                        adapter=adapter,
+                        openai_key=openai_key,
+                    )
+                    if not error_message
+                    else {"quality_score": None, "accuracy": None, "answer_relevancy": None, "faithfulness": None, "eval_engine": "skipped"}
+                )
                 rows.append(
                     {
                         "model_id": model_id,
                         "provider": resolution.provider_name,
                         "prompt_id": prompt.id,
+                        "prompt_version": prompt.version,
                         "input_index": index,
                         "input": test_input,
                         "raw_output": output_text,
-                        "raw_provider_payload": payload,
                         "latency_ms": round(elapsed_ms, 2),
                         "input_tokens": input_tokens,
                         "output_tokens": output_tokens,
                         "cost_usd": cost_usd,
-                        "quality_score": quality_score,
-                        "accuracy": accuracy,
-                        "answer_relevancy": answer_relevancy,
-                        "faithfulness": faithfulness,
+                        "cost_is_local": model_is_local(model_id) or resolution.provider_name == "ollama",
+                        **metrics,
                         "error": error_message,
                     }
                 )
 
-    total_cost = round(sum(row["cost_usd"] for row in rows), 6)
-    avg_quality = round(sum((row["quality_score"] or 0.0) for row in rows) / max(len(rows), 1), 2)
-    avg_accuracy = None
-    accuracy_values = [row["accuracy"] for row in rows if row["accuracy"] is not None]
-    if accuracy_values:
-        avg_accuracy = round(sum(accuracy_values) / len(accuracy_values), 2)
-    latencies = [row["latency_ms"] for row in rows]
-    summary = {
-        "row_count": len(rows),
-        "total_cost_usd": total_cost,
-        "quality_score": avg_quality,
-        "accuracy": avg_accuracy,
-        "latency_p50_ms": round(sorted(latencies)[len(latencies) // 2], 2) if latencies else 0.0,
-        "latency_p95_ms": round(sorted(latencies)[max(0, math.ceil(len(latencies) * 0.95) - 1)], 2) if latencies else 0.0,
-        "input_tokens": sum(row["input_tokens"] for row in rows),
-        "output_tokens": sum(row["output_tokens"] for row in rows),
-    }
-    return ExperimentRunResult(rows=rows, summary=summary)
-
-
-def log_experiment_to_mlflow(
-    experiment: Experiment,
-    *,
-    task_type: str,
-    prompt_ids: list[str],
-    model_ids: list[str],
-    test_inputs: list[dict[str, Any]],
-    results: dict[str, Any],
-) -> str | None:
-    try:
-        mlflow.set_tracking_uri(settings.mlflow_tracking_uri)
-        mlflow.set_experiment("Optiq")
-        with mlflow.start_run(run_name=f"experiment-{experiment.id}") as run:
-            mlflow.log_params(
-                {
-                    "experiment_id": experiment.id,
-                    "task_type": task_type,
-                    "prompt_ids": ",".join(prompt_ids),
-                    "model_ids": ",".join(model_ids),
-                }
-            )
-            for key, value in results.get("summary", {}).items():
-                if isinstance(value, (int, float)) and value is not None:
-                    mlflow.log_metric(key, float(value))
-            with tempfile.TemporaryDirectory() as temp_dir:
-                artifact_path = Path(temp_dir) / "experiment-results.json"
-                artifact_path.write_text(
-                    json.dumps({"test_inputs": test_inputs, "results": results}, indent=2),
-                    encoding="utf-8",
-                )
-                mlflow.log_artifact(str(artifact_path))
-            return run.info.run_id
-    except Exception:
-        return None
+    summary = aggregate_rows(rows)
+    summary["per_model"] = per_model_summary(rows)
+    return ExperimentRunResult(rows=rows, summary=summary, prompts=prompts)
 
 
 def list_project_provider_views(db: Session, project_id: str) -> list[dict[str, Any]]:
@@ -507,29 +518,59 @@ def list_project_provider_views(db: Session, project_id: str) -> list[dict[str, 
         provider_cfg = get_provider_config(provider_name)
         if not provider_cfg:
             continue
-        models = [model for model in list_models(provider=provider_name, include_disabled=False)]
         provider_key = configured.get(provider_name)
+        status_message = None
+        if provider_name == "ollama" and provider_key:
+            base_url = normalize_ollama_base_url(
+                provider_key.ollama_base_url or settings.ollama_base_url,
+                settings.ollama_base_url,
+            )
+            tags, error = list_installed_ollama_models(base_url)
+            registry_by_id = {model.id: model for model in list_models(provider="ollama", include_disabled=False)}
+            models_payload = []
+            for tag in tags:
+                short = tag.split(":", 1)[0]
+                registered = registry_by_id.get(tag) or registry_by_id.get(short)
+                models_payload.append(
+                    {
+                        "id": tag,
+                        "display_name": registered.display_name if registered else tag,
+                        "default_temperature": registered.default_temperature if registered else 0.7,
+                        "max_tokens": registered.max_tokens if registered else 4096,
+                        "pricing": None,
+                    }
+                )
+            if error:
+                status_message = error
+            elif not tags:
+                status_message = f"Ollama is reachable at {base_url} but no models are installed. Pull a model with `ollama pull`."
+        elif provider_key and (provider_name == "ollama" or provider_key.encrypted_api_key):
+            models_payload = [
+                {
+                    "id": model.id,
+                    "display_name": model.display_name,
+                    "default_temperature": model.default_temperature,
+                    "max_tokens": model.max_tokens,
+                    "pricing": None
+                    if not model.pricing
+                    else {
+                        "input_per_1m": model.pricing.input_per_1m,
+                        "output_per_1m": model.pricing.output_per_1m,
+                    },
+                }
+                for model in list_models(provider=provider_name, include_disabled=False)
+            ]
+        else:
+            models_payload = []
+
         views.append(
             {
                 "provider_name": provider_name,
                 "configured": provider_key is not None,
                 "has_api_key": bool(provider_key and provider_key.encrypted_api_key),
                 "ollama_base_url": provider_key.ollama_base_url if provider_key else None,
-                "available_models": [
-                    {
-                        "id": model.id,
-                        "display_name": model.display_name,
-                        "default_temperature": model.default_temperature,
-                        "max_tokens": model.max_tokens,
-                        "pricing": None
-                        if not model.pricing
-                        else {
-                            "input_per_1m": model.pricing.input_per_1m,
-                            "output_per_1m": model.pricing.output_per_1m,
-                        },
-                    }
-                    for model in models
-                ],
+                "available_models": models_payload,
+                "status_message": status_message,
             }
         )
     return views
@@ -589,10 +630,23 @@ def score_recommendations(options: list[dict[str, Any]], request: dict[str, Any]
 
     ranked.sort(key=lambda row: row["overall_score"], reverse=True)
     top = ranked[0]
-    justification = (
-        f"Selected {top.get('model_id')} because it balances quality ({top.get('quality_score')}) "
-        f"with latency ({top.get('latency_ms')} ms) and cost (${top.get('cost_usd')})."
-    )
+    if all(option.get("failed") for option in ranked):
+        justification = (
+            f"{top.get('model_id')} is listed first, but every compared run failed. "
+            "Fix the model errors in Experiment Runner before trusting this ranking."
+        )
+    elif all((option.get("quality_score") or 0) == 0 for option in ranked) and all(
+        (option.get("cost_usd") or 0) == 0 for option in ranked
+    ):
+        justification = (
+            f"{top.get('model_id')} ranks first on the selected basis, but quality is 0 and cost is $0. "
+            "This usually means the experiment generations failed or only local models ran."
+        )
+    else:
+        justification = (
+            f"Selected {top.get('model_id')} because it balances quality ({top.get('quality_score')}) "
+            f"with latency ({top.get('latency_ms')} ms) and cost (${top.get('cost_usd')})."
+        )
     return ranked, excluded, top, justification
 
 

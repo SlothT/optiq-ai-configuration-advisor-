@@ -1,0 +1,51 @@
+services:
+  - type: web
+    name: optiq-api
+    runtime: docker
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: ./backend
+    healthCheckPath: /health
+    envVars:
+      - key: PORT
+        value: 8000
+      - key: DATABASE_URL
+        sync: false
+      - key: REDIS_URL
+        sync: false
+      - key: JWT_SECRET
+        sync: false
+      - key: FERNET_KEY
+        sync: false
+      - key: FRONTEND_URL
+        sync: false
+      - key: MLFLOW_TRACKING_URI
+        value: ""
+      - key: SMTP_HOST
+        sync: false
+      - key: SMTP_PORT
+        sync: false
+      - key: SMTP_USER
+        sync: false
+      - key: SMTP_PASSWORD
+        sync: false
+      - key: SMTP_FROM
+        sync: false
+      - key: SMTP_USE_TLS
+        value: "true"
+  - type: worker
+    name: optiq-worker
+    runtime: docker
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: ./backend
+    dockerCommand: rq worker --url $REDIS_URL default
+    envVars:
+      - fromService:
+          type: web
+          name: optiq-api
+          envVarKey: DATABASE_URL
+      - key: REDIS_URL
+        sync: false
+      - key: JWT_SECRET
+        sync: false
+      - key: FERNET_KEY
+        sync: false

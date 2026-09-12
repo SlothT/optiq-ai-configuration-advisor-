@@ -46,3 +46,19 @@ mlflow/artifacts/
 
 # Docker
 *.log
+
+# Local / internal notes — keep on disk, not on GitHub
+status.txt
+planner.md
+review1.md
+*.tsbuildinfo
+
+# Cursor / editor local
+.cursor/
+.cursorignore
+.playwright-mcp/
+
+# Extra Python / Next caches
+backend/.pytest_cache/
+backend/.ruff_cache/
+frontend/.next/

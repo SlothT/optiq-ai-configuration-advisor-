@@ -4,9 +4,9 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, s
 from sqlalchemy.orm import Session
 
 from app.core.deps import db_session, get_current_user, get_project_for_user
-from app.models.domain import Prompt, Project, User
+from app.models.domain import Prompt, User
 from app.schemas.domain import PromptAnalyzeResponse
-from app.services.phase1 import analyze_prompt, _resolve_prompt_text
+from app.services.phase1 import analyze_prompt, compose_prompt_with_context
 
 router = APIRouter(prefix="/api/v1/prompts", tags=["prompts"])
 
@@ -18,23 +18,37 @@ async def analyze_prompt_route(
     judge_model: str = Form(...),
     text: str | None = Form(None),
     source_prompt_id: str | None = Form(None),
+    files: list[UploadFile] = File(default=[]),
     file: UploadFile | None = File(None),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(db_session),
 ) -> dict:
     get_project_for_user(project_id, current_user, db)
-    raw_bytes = await file.read() if file else b""
-    prompt_text = _resolve_prompt_text(file.filename if file else None, raw_bytes, text)
-    if not prompt_text.strip():
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Prompt text or file content is required")
+    user_prompt = (text or "").strip()
+    uploads = list(files or [])
+    if file is not None:
+        uploads.append(file)
+    attachments: list[tuple[str | None, bytes]] = []
+    for upload in uploads:
+        attachments.append((upload.filename, await upload.read()))
+
+    composed, context_text, context_meta = compose_prompt_with_context(user_prompt, attachments)
+    if not user_prompt:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Enter a user prompt. Uploaded files are used as context, not as the prompt.",
+        )
 
     prompt, analysis = analyze_prompt(
         db,
         project_id=project_id,
         task_type=task_type,
-        prompt_text=prompt_text,
+        prompt_text=composed,
         judge_model=judge_model,
         source_prompt_id=source_prompt_id,
+        user_prompt=user_prompt,
+        context_text=context_text,
+        context_meta=context_meta,
     )
     db.commit()
     db.refresh(prompt)
@@ -47,6 +61,7 @@ async def analyze_prompt_route(
         "suggested_improvements": analysis.suggested_improvements,
         "estimated_tokens": analysis.estimated_tokens,
         "estimated_cost_usd": analysis.estimated_cost_usd,
+        "cost_is_local": bool(analysis.analysis_json.get("cost_is_local")),
         "judge_model": analysis.judge_model,
         "analysis_json": analysis.analysis_json,
     }

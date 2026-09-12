@@ -1,5 +1,15 @@
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 
+export class ApiError extends Error {
+  status: number;
+
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+  }
+}
+
 export function getAuthToken() {
   if (typeof window === "undefined") {
     return null;
@@ -16,6 +26,19 @@ export function setAuthToken(token: string | null) {
   } else {
     window.localStorage.removeItem("optiq_token");
   }
+  window.dispatchEvent(new Event("optiq-auth"));
+}
+
+function parseErrorMessage(text: string, status: number) {
+  try {
+    const parsed = JSON.parse(text) as { detail?: unknown };
+    if (typeof parsed.detail === "string") {
+      return parsed.detail;
+    }
+  } catch {
+    /* use fallback */
+  }
+  return text || `API request failed: ${status}`;
 }
 
 export async function apiFetch(path: string, init?: RequestInit & { token?: string | null }) {
@@ -28,15 +51,23 @@ export async function apiFetch(path: string, init?: RequestInit & { token?: stri
     headers.set("Content-Type", "application/json");
   }
 
-  const response = await fetch(`${API_BASE_URL}${path}`, {
-    ...init,
-    headers,
-    cache: "no-store",
-  });
+  let response: Response;
+  try {
+    response = await fetch(`${API_BASE_URL}${path}`, {
+      ...init,
+      headers,
+      cache: "no-store",
+    });
+  } catch {
+    throw new ApiError(
+      `Cannot reach the API at ${API_BASE_URL}. Start the backend, then try again.`,
+      0,
+    );
+  }
 
   if (!response.ok) {
-    const message = await response.text();
-    throw new Error(message || `API request failed: ${response.status}`);
+    const message = parseErrorMessage(await response.text(), response.status);
+    throw new ApiError(message, response.status);
   }
 
   return response.json();
