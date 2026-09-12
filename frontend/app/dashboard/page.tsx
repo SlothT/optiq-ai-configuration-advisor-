@@ -139,7 +139,7 @@ export default function DashboardPage() {
                         const max = Math.max(...compared.map((item) => metric(item, key)), 0.000001);
                         return (
                             <div key={key}>
-                                <p className="mb-2 text-sm font-medium capitalize">{key.replaceAll("_", " ")}</p>
+                                <p className="mb-2 text-sm font-medium capitalize">{key.replace(/_/g, " ")}</p>
                                 <div className="grid gap-2">
                                     {compared.map((item) => (
                                         <div key={`${item.id}-${key}`} className="grid grid-cols-[8rem_1fr_4rem] items-center gap-3 text-sm">
