@@ -1,330 +1,173 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 
 import { apiFetch, getAuthToken } from "@/lib/api";
-import { analysisModeLabel, formatUsdCost } from "@/lib/cost";
-import type { PromptAnalysis, Project, ProviderView, SavedPrompt } from "@/lib/types";
+import { formatUsdCost } from "@/lib/cost";
+import type { ModelAdvice, AdviceOption, Project, PromptAnalysis } from "@/lib/types";
 
-const taskTypes = ["summarization", "qa", "sql_generation", "classification", "open_ended"];
-
-export default function PromptAnalyzerPage() {
+export default function ModelAdvisorPage() {
     const router = useRouter();
-    const [token, setToken] = useState<string | null>(null);
+    const [prompt, setPrompt] = useState("Write an 800-word introductory essay about remote work for a general audience.");
+    const [preference, setPreference] = useState("cost");
+    const [outputTokens, setOutputTokens] = useState(1200);
+    const [baseline, setBaseline] = useState("");
+    const [provider, setProvider] = useState("");
+    const [localOnly, setLocalOnly] = useState(false);
+    const [maxCost, setMaxCost] = useState("");
+    const [models, setModels] = useState<Array<{ id: string; display_name: string }>>([]);
     const [projects, setProjects] = useState<Project[]>([]);
-    const [providers, setProviders] = useState<ProviderView[]>([]);
-    const [versions, setVersions] = useState<SavedPrompt[]>([]);
     const [projectId, setProjectId] = useState("");
-    const [taskType, setTaskType] = useState("open_ended");
-    const [judgeModel, setJudgeModel] = useState("auto");
-    const [promptText, setPromptText] = useState("Write a concise summary of the following customer feedback.");
-    const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
-    const [analysis, setAnalysis] = useState<PromptAnalysis | null>(null);
-    const [sourcePromptId, setSourcePromptId] = useState<string | null>(null);
-    const [message, setMessage] = useState<string | null>(null);
+    const [result, setResult] = useState<ModelAdvice | null>(null);
+    const [submittedPrompt, setSubmittedPrompt] = useState("");
     const [loading, setLoading] = useState(false);
+    const [message, setMessage] = useState<string | null>(null);
 
     useEffect(() => {
-        const storedToken = getAuthToken();
-        setToken(storedToken);
+        void apiFetch("/api/v1/models").then((data) => setModels(data.models)).catch(() => setMessage("Could not load the model list. Check API connectivity."));
+        const token = getAuthToken();
+        if (token) {
+            void apiFetch("/api/v1/projects", { token }).then((data: Project[]) => {
+                setProjects(data);
+                setProjectId(data[0]?.id || "");
+            }).catch(() => setMessage("Sign in again to save prompts and run optional tests."));
+        }
     }, []);
 
-    const availableJudgeModels = useMemo(
-        () => providers.filter((provider) => provider.configured).flatMap((provider) => provider.available_models),
-        [providers],
-    );
-
-    const loadVersions = useCallback(async (activeToken: string, nextProjectId: string) => {
-        const data = (await apiFetch(`/api/v1/prompts?project_id=${nextProjectId}`, { token: activeToken })) as SavedPrompt[];
-        setVersions(data);
-    }, []);
-
-    const loadProviders = useCallback(async (activeToken: string, nextProjectId: string) => {
-        const data = (await apiFetch(`/api/v1/projects/${nextProjectId}/providers`, { token: activeToken })) as ProviderView[];
-        setProviders(data);
-    }, []);
-
-    const loadProjects = useCallback(async (activeToken: string) => {
-        const data = (await apiFetch("/api/v1/projects", { token: activeToken })) as Project[];
-        setProjects(data);
-        if (data[0]) {
-            setProjectId(data[0].id);
-            await Promise.all([
-                loadProviders(activeToken, data[0].id),
-                loadVersions(activeToken, data[0].id),
-            ]);
-        }
-    }, [loadProviders, loadVersions]);
-
-    useEffect(() => {
-        if (!token) {
-            return;
-        }
-        void loadProjects(token);
-    }, [token, loadProjects]);
-
-    function addFiles(fileList: FileList | null) {
-        if (!fileList?.length) {
-            return;
-        }
-        setSelectedFiles((current) => {
-            const next = [...current];
-            Array.from(fileList).forEach((file) => {
-                if (!next.some((item) => item.name === file.name && item.size === file.size)) {
-                    next.push(file);
-                }
-            });
-            return next;
-        });
-    }
-
-    async function handleAnalyze() {
-        if (!token || !projectId) {
-            setMessage("Create and select a project first.");
-            return;
-        }
-        if (!promptText.trim()) {
-            setMessage("Enter a user prompt. Files are attached as context only.");
-            return;
-        }
+    async function getAdvice() {
         setLoading(true);
         setMessage(null);
+        setResult(null);
         try {
-            const formData = new FormData();
-            formData.append("project_id", projectId);
-            formData.append("task_type", taskType);
-            formData.append("judge_model", judgeModel);
-            formData.append("text", promptText);
-            selectedFiles.forEach((file) => formData.append("files", file));
-            if (sourcePromptId) {
-                formData.append("source_prompt_id", sourcePromptId);
-            }
-            const result = (await apiFetch("/api/v1/prompts/analyze", { token, method: "POST", body: formData })) as PromptAnalysis;
-            setAnalysis(result);
-            setSourcePromptId(result.prompt_id);
-            await loadVersions(token, projectId);
-            const skipped = Array.isArray(result.analysis_json.skipped_files)
-                ? result.analysis_json.skipped_files.filter((item): item is string => typeof item === "string")
-                : [];
-            const mode = analysisModeLabel(result.analysis_json.analysis_mode);
-            setMessage(`Saved prompt version ${result.version} (${mode}).${skipped.length ? ` Skipped: ${skipped.join("; ")}` : ""}`);
+            const data = await apiFetch("/api/v1/advice", {
+                method: "POST",
+                body: JSON.stringify({
+                    prompt, preference, expected_output_tokens: outputTokens,
+                    baseline_model_id: baseline || null,
+                    allowed_providers: provider ? [provider] : [], local_only: localOnly,
+                    max_cost_usd: maxCost === "" ? null : Number(maxCost),
+                }),
+            }) as ModelAdvice;
+            setResult(data);
+            setSubmittedPrompt(prompt);
         } catch (error) {
-            setMessage(error instanceof Error ? error.message : "Analysis failed");
+            setMessage(error instanceof Error ? error.message : "Advice failed");
         } finally {
             setLoading(false);
         }
     }
 
-    function sendToExperiment() {
-        if (!analysis || !projectId) {
-            setMessage("Analyze a prompt before sending it to Experiment Runner.");
+    async function prepareTest() {
+        const token = getAuthToken();
+        if (!token || !projectId || !result?.recommended) {
+            setMessage("Sign in and select a project to save this prompt for optional testing. Advice needs no account or keys.");
             return;
         }
-        const params = new URLSearchParams({
-            project_id: projectId,
-            prompt_id: analysis.prompt_id,
-            task_type: taskType,
-        });
-        router.push(`/experiment-runner?${params.toString()}`);
+        setLoading(true);
+        try {
+            const data = new FormData();
+            data.append("project_id", projectId);
+            data.append("text", submittedPrompt);
+            data.append("task_type", result.task_type);
+            data.append("judge_model", "local");
+            const saved = await apiFetch("/api/v1/prompts/analyze", { token, method: "POST", body: data }) as PromptAnalysis;
+            const selected = [result.recommended.model_id];
+            if (result.baseline && result.baseline.model_id !== selected[0]) selected.push(result.baseline.model_id);
+            router.push(`/experiment-runner?${new URLSearchParams({
+                project_id: projectId, prompt_id: saved.prompt_id, task_type: result.task_type,
+                model_ids: selected.join(","), max_output_tokens: String(result.expected_output_tokens),
+            }).toString()}`);
+        } catch (error) {
+            setMessage(error instanceof Error ? error.message : "Could not prepare comparison");
+        } finally {
+            setLoading(false);
+        }
     }
 
-    const promptTokens = typeof analysis?.analysis_json.prompt_tokens === "number" ? analysis.analysis_json.prompt_tokens : null;
-    const contextTokens = typeof analysis?.analysis_json.context_tokens === "number" ? analysis.analysis_json.context_tokens : null;
-    const contextFiles = Array.isArray(analysis?.analysis_json.context_files)
-        ? analysis.analysis_json.context_files.filter((item): item is string => typeof item === "string")
-        : [];
+    async function copyConfig(option: AdviceOption) {
+        try {
+            await navigator.clipboard.writeText(JSON.stringify({
+                prompt: submittedPrompt, provider: option.provider, model: option.model_id,
+                temperature: option.temperature, max_output_tokens: option.max_output_tokens,
+            }, null, 2));
+            setMessage("Copied the prompt and model settings.");
+        } catch {
+            setMessage("Clipboard is unavailable. Copy the model identifier and settings from the card.");
+        }
+    }
 
     return (
-        <section className="grid gap-6 lg:grid-cols-[1fr_0.9fr]">
+        <section className="grid gap-6 lg:grid-cols-2">
             <div className="rounded-[2rem] border border-black/5 bg-white/85 p-8 shadow-panel">
-                <h2 className="text-3xl font-semibold">Prompt Analyzer</h2>
-                <p className="mt-2 text-sm text-ink/70">Score your prompt. Uploaded files and folders are context, not a replacement for the prompt.</p>
+                <h2 className="text-3xl font-semibold">Model Advisor</h2>
+                <p className="mt-2 text-sm text-ink/70">Find an affordable starting model for your prompt. Advice runs locally with no paid model calls, API keys, or dataset.</p>
                 <div className="mt-6 grid gap-4">
-                    <label className="grid gap-2 text-sm font-medium">
-                        Project
-                        <select
-                            className="rounded-2xl border border-black/10 px-4 py-3"
-                            value={projectId}
-                            onChange={(event) => {
-                                const nextProjectId = event.target.value;
-                                setProjectId(nextProjectId);
-                                setAnalysis(null);
-                                setSourcePromptId(null);
-                                if (token && nextProjectId) {
-                                    void loadProviders(token, nextProjectId);
-                                    void loadVersions(token, nextProjectId);
-                                }
-                            }}
-                        >
-                            <option value="">Select a project</option>
-                            {projects.map((project) => (
-                                <option key={project.id} value={project.id}>
-                                    {project.name}
-                                </option>
-                            ))}
+                    <label className="grid gap-2 text-sm font-medium">Your prompt
+                        <textarea className="min-h-48 rounded-2xl border border-black/10 p-4" value={prompt} onChange={(event) => setPrompt(event.target.value)} />
+                    </label>
+                    <label className="grid gap-2 text-sm font-medium">Preference
+                        <select className="rounded-2xl border border-black/10 p-3" value={preference} onChange={(event) => setPreference(event.target.value)}>
+                            <option value="cost">Lower cost</option><option value="quality">More demanding quality</option>
                         </select>
                     </label>
-                    <div className="grid gap-2 text-sm font-medium">
-                        Upload file or folder for context
-                        <p className="font-normal text-ink/60">Optional. Markdown, text, CSV, JSON, or YAML. Large or binary files are skipped.</p>
-                        <input
-                            className="rounded-2xl border border-black/10 px-4 py-3"
-                            type="file"
-                            multiple
-                            accept=".md,.markdown,.txt,.csv,.json,.yml,.yaml"
-                            onChange={(event) => {
-                                addFiles(event.target.files);
-                                event.target.value = "";
-                            }}
-                        />
-                        <label className="text-sm font-normal text-ink/70">
-                            Or choose a folder
-                            <input
-                                className="mt-2 block w-full rounded-2xl border border-black/10 px-4 py-3"
-                                type="file"
-                                multiple
-                                // @ts-expect-error non-standard directory picker
-                                webkitdirectory=""
-                                onChange={(event) => {
-                                    addFiles(event.target.files);
-                                    event.target.value = "";
-                                }}
-                            />
-                        </label>
-                        {selectedFiles.length ? (
-                            <ul className="grid gap-1 font-normal text-ink/70">
-                                {selectedFiles.map((file) => (
-                                    <li key={`${file.name}-${file.size}`} className="flex items-center justify-between gap-3">
-                                        <span>{file.name}</span>
-                                        <button className="text-xs" onClick={() => setSelectedFiles((current) => current.filter((item) => item !== file))} type="button">
-                                            Remove
-                                        </button>
-                                    </li>
-                                ))}
-                            </ul>
-                        ) : null}
-                    </div>
-                    <label className="grid gap-2 text-sm font-medium">
-                        Judge model
-                        <select className="rounded-2xl border border-black/10 px-4 py-3" value={judgeModel} onChange={(event) => setJudgeModel(event.target.value)}>
-                            <option value="auto">Auto (best configured model)</option>
-                            {availableJudgeModels.map((model) => (
-                                <option key={model.id} value={model.id}>
-                                    {model.display_name}
-                                </option>
-                            ))}
+                    <label className="grid gap-2 text-sm font-medium">Expected output tokens
+                        <input className="rounded-2xl border border-black/10 p-3" type="number" min="1" max="4096" value={outputTokens} onChange={(event) => setOutputTokens(Number(event.target.value))} />
+                        <span className="font-normal text-ink/60">An estimate and optional test limit. Words and tokens are different.</span>
+                    </label>
+                    <label className="grid gap-2 text-sm font-medium">Compare cost with (optional)
+                        <select className="rounded-2xl border border-black/10 p-3" value={baseline} onChange={(event) => setBaseline(event.target.value)}>
+                            <option value="">No baseline</option>{models.map((model) => <option key={model.id} value={model.id}>{model.display_name}</option>)}
                         </select>
                     </label>
-                    <label className="grid gap-2 text-sm font-medium">
-                        User prompt
-                        <textarea
-                            className="min-h-48 rounded-2xl border border-black/10 px-4 py-3"
-                            placeholder="Describe the task you want the model to do."
-                            value={promptText}
-                            onChange={(event) => setPromptText(event.target.value)}
-                        />
-                    </label>
-                    <label className="grid gap-2 text-sm font-medium text-ink/80">
-                        Task type
-                        <select className="rounded-2xl border border-black/10 px-4 py-3" value={taskType} onChange={(event) => setTaskType(event.target.value)}>
-                            {taskTypes.map((value) => (
-                                <option key={value} value={value}>
-                                    {value}
-                                </option>
-                            ))}
-                        </select>
-                    </label>
-                    <div className="flex flex-wrap gap-3">
-                        <button className="rounded-full bg-ink px-5 py-3 text-sm font-medium text-paper disabled:opacity-60" disabled={loading} onClick={handleAnalyze} type="button">
-                            {loading ? "Analyzing..." : analysis ? "Re-analyze" : "Analyze prompt"}
-                        </button>
-                        <button className="rounded-full border border-black/15 bg-white px-5 py-3 text-sm font-medium disabled:opacity-60" disabled={!analysis} onClick={sendToExperiment} type="button">
-                            Send to Experiment Runner
-                        </button>
-                    </div>
-                    {message ? <p className="text-sm text-ink/70">{message}</p> : null}
+                    <details className="rounded-2xl border border-black/10 p-4">
+                        <summary className="cursor-pointer text-sm font-medium">Provider and cost requirements</summary>
+                        <div className="mt-3 grid gap-3 text-sm">
+                            <label className="grid gap-2">Provider
+                                <select className="rounded-xl border p-2" value={provider} onChange={(event) => setProvider(event.target.value)}>
+                                    <option value="">Any supported provider</option>{["openai", "anthropic", "google", "ollama"].map((name) => <option key={name}>{name}</option>)}
+                                </select>
+                            </label>
+                            <label className="flex gap-2"><input type="checkbox" checked={localOnly} onChange={(event) => setLocalOnly(event.target.checked)} />Local inference only</label>
+                            <label className="grid gap-2">Maximum API cost per request (USD, optional)
+                                <input className="rounded-xl border p-2" type="number" min="0" step="0.0001" value={maxCost} onChange={(event) => setMaxCost(event.target.value)} />
+                            </label>
+                        </div>
+                    </details>
+                    <button className="rounded-full bg-ink px-5 py-3 text-sm font-medium text-paper disabled:opacity-60" disabled={loading || !prompt.trim()} onClick={getAdvice} type="button">{loading ? "Working..." : "Suggest a model"}</button>
+                    {message ? <p role="status" className="text-sm text-ink/70">{message}</p> : null}
                 </div>
             </div>
-
-            <div className="grid gap-4">
-                <div className="rounded-[2rem] border border-black/5 bg-white/85 p-8 shadow-panel">
-                    <h3 className="text-2xl font-semibold">Results</h3>
-                    {analysis ? (
-                        <div className="mt-5 grid gap-4">
-                            <div className="rounded-2xl bg-sand p-4">
-                                <p className="text-sm uppercase tracking-[0.2em] text-ink/60">Quality score</p>
-                                <p className="text-4xl font-semibold">{analysis.quality_score}</p>
-                                <p className="mt-1 text-sm text-ink/60">
-                                    v{analysis.version}
-                                    {analysis.judge_model ? ` · ${analysis.judge_model}` : ""}
-                                    {` · ${analysisModeLabel(analysis.analysis_json.analysis_mode)}`}
-                                </p>
-                                <p className="mt-2 text-sm text-ink/70">
-                                    Analyzed the user prompt{promptTokens != null ? ` (${promptTokens} tokens)` : ""}
-                                    {contextTokens ? ` plus ${contextTokens} tokens of uploaded context` : " with no extra document context"}
-                                    {contextFiles.length ? ` (${contextFiles.join(", ")})` : ""}.
-                                </p>
-                            </div>
-                            <div>
-                                <p className="text-sm font-semibold">Strengths</p>
-                                <ul className="mt-2 list-disc pl-5 text-sm text-ink/70">
-                                    {analysis.strengths.map((item) => <li key={item}>{item}</li>)}
-                                </ul>
-                            </div>
-                            <div>
-                                <p className="text-sm font-semibold">Weaknesses</p>
-                                <ul className="mt-2 list-disc pl-5 text-sm text-ink/70">
-                                    {analysis.weaknesses.map((item) => <li key={item}>{item}</li>)}
-                                </ul>
-                            </div>
-                            <div className="grid grid-cols-2 gap-3 text-sm">
-                                <div className="rounded-2xl border border-black/10 p-4">
-                                    <p className="text-ink/60">Tokens</p>
-                                    <p className="text-xl font-semibold">{analysis.estimated_tokens}</p>
-                                </div>
-                                <div className="rounded-2xl border border-black/10 p-4">
-                                    <p className="text-ink/60">Estimated cost</p>
-                                    <p className="text-xl font-semibold">{formatUsdCost(analysis.estimated_cost_usd, analysis.cost_is_local || Boolean(analysis.analysis_json.cost_is_local))}</p>
-                                </div>
-                            </div>
-                            <div>
-                                <p className="text-sm font-semibold">Suggestions</p>
-                                <ul className="mt-2 list-disc pl-5 text-sm text-ink/70">
-                                    {analysis.suggested_improvements.map((item) => <li key={item}>{item}</li>)}
-                                </ul>
-                            </div>
-                        </div>
-                    ) : (
-                        <p className="mt-4 text-sm text-ink/70">Run an analysis to see prompt quality feedback here.</p>
-                    )}
-                </div>
-                <div className="rounded-[2rem] border border-black/5 bg-white/85 p-8 shadow-panel">
-                    <h3 className="text-xl font-semibold">Saved versions</h3>
-                    {versions.length ? (
-                        <ul className="mt-4 grid gap-2">
-                            {versions.map((prompt) => (
-                                <li key={prompt.id}>
-                                    <button
-                                        className="w-full rounded-2xl border border-black/10 px-4 py-3 text-left text-sm hover:border-accent"
-                                        onClick={() => {
-                                            setPromptText(prompt.raw_text.split("--- Context from uploaded files ---")[0].trim());
-                                            setTaskType(prompt.task_type);
-                                            setSourcePromptId(prompt.id);
-                                            setSelectedFiles([]);
-                                            setMessage(`Loaded version ${prompt.version} for re-analysis.`);
-                                        }}
-                                        type="button"
-                                    >
-                                        v{prompt.version} · score {prompt.quality_score} · {prompt.task_type}
-                                    </button>
-                                </li>
-                            ))}
-                        </ul>
-                    ) : (
-                        <p className="mt-3 text-sm text-ink/70">Analyzed prompts for this project will appear here.</p>
-                    )}
-                </div>
+            <div className="rounded-[2rem] border border-black/5 bg-white/85 p-8 shadow-panel">
+                {result ? <div className="grid gap-4">
+                    <h3 className="text-xl font-semibold">{result.recommended ? "Suggested starting model · untested" : result.outcome === "no_suitable_supported_model" ? "No suitable supported model" : "More information needed"}</h3>
+                    <p className="text-sm text-ink/70">{result.explanation}</p>
+                    {[result.recommended, ...result.alternatives].filter((option): option is AdviceOption => option !== null).map((option, index) => <div key={option.model_id} className={`rounded-2xl border p-4 ${index === 0 ? "border-accent bg-sand" : "border-black/10"}`}>
+                        <h4 className="font-semibold">{option.display_name}</h4>
+                        <p className="mt-1 text-sm">{option.model_id} · {formatUsdCost(option.estimated_cost_usd, option.cost_is_local)} / request</p>
+                        <p className="mt-2 text-sm text-ink/70">{option.reason}</p>
+                        <p className="mt-1 text-sm text-ink/60">{option.limitation}</p>
+                        {option.pricing_source ? <a className="mt-2 block text-xs underline" href={option.pricing_source} target="_blank" rel="noreferrer">Pricing source · checked {option.pricing_checked_at}</a> : null}
+                        <p className="mt-2 text-xs text-ink/60">Temperature {option.temperature} · output limit {option.max_output_tokens}</p>
+                        <button className="mt-3 rounded-full border border-black/15 px-4 py-2 text-sm" type="button" onClick={() => void copyConfig(option)}>Copy prompt and settings</button>
+                    </div>)}
+                    {result.baseline ? <div className="rounded-2xl border border-black/10 p-4 text-sm">
+                        <p>Baseline {result.baseline.model_id}: {formatUsdCost(result.baseline.estimated_cost_usd)} / request</p>
+                        {result.baseline.estimated_savings_usd !== null ? <p className="mt-1">Estimated difference: {formatUsdCost(result.baseline.estimated_savings_usd)} / request</p> : null}
+                        <p className="mt-2 text-ink/60">{result.baseline.note}</p>
+                    </div> : null}
+                    <ul className="list-disc space-y-2 pl-5 text-sm text-ink/60">{[...result.assumptions, ...result.limitations].map((item) => <li key={item}>{item}</li>)}</ul>
+                    {result.recommended ? <div className="mt-2 grid gap-3 border-t pt-4">
+                        <h4 className="font-semibold">Optional comparison</h4>
+                        <p className="text-sm text-ink/60">Testing can cost more than it saves for a one-off task. Sign in and configure providers to compare outputs; review the estimate before execution.</p>
+                        {projects.length ? <label className="grid gap-2 text-sm">Save in project
+                            <select className="rounded-xl border p-3" value={projectId} onChange={(event) => setProjectId(event.target.value)}>{projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}</select>
+                        </label> : <Link href="/settings" className="text-sm underline">Sign in and create a project in Settings</Link>}
+                        <button className="rounded-full border border-black/15 px-5 py-3 text-sm disabled:opacity-60" type="button" disabled={loading || !projectId} onClick={prepareTest}>Prepare optional test</button>
+                    </div> : null}
+                    {result.excluded.length ? <details className="text-sm"><summary className="cursor-pointer">Excluded candidates</summary><ul className="mt-2 space-y-2">{result.excluded.map((item) => <li key={item.model_id}>{item.model_id}: {item.reasons.join("; ")}</li>)}</ul></details> : null}
+                </div> : <p className="text-sm text-ink/60">Paste a prompt to see model advice and estimated costs. Nothing is sent to model providers for advice.</p>}
             </div>
         </section>
     );

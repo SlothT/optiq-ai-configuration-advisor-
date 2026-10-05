@@ -59,7 +59,7 @@ export type ExperimentRow = {
   latency_ms: number;
   input_tokens: number;
   output_tokens: number;
-  cost_usd: number;
+  cost_usd: number | null;
   cost_is_local?: boolean;
   quality_score?: number | null;
   accuracy?: number | null;
@@ -82,6 +82,7 @@ export type ExperimentSummary = {
     rows?: ExperimentRow[];
     summary?: Record<string, number | null>;
     per_model?: Array<Record<string, unknown>>;
+    user_feedback?: Record<string, { accepted: boolean; scope: string }>;
     label?: string;
     error?: string;
   } | null;
@@ -96,4 +97,31 @@ export type RecommendationResult = {
   ranked_options: Array<Record<string, unknown>>;
   excluded_options: Array<Record<string, unknown>>;
   justification: string;
+};
+
+export type AdviceOption = {
+  model_id: string;
+  display_name: string;
+  provider: string;
+  estimated_cost_usd: number;
+  cost_is_local: boolean;
+  reason: string;
+  limitation: string;
+  temperature: number;
+  max_output_tokens: number;
+  pricing_source: string | null;
+  pricing_checked_at: string | null;
+};
+
+export type ModelAdvice = {
+  outcome: string;
+  task_type: string;
+  explanation: string;
+  expected_output_tokens: number;
+  recommended: AdviceOption | null;
+  alternatives: AdviceOption[];
+  assumptions: string[];
+  limitations: string[];
+  excluded: Array<{ model_id: string; reasons: string[] }>;
+  baseline: { model_id: string; estimated_cost_usd: number; estimated_savings_usd: number | null; note: string } | null;
 };

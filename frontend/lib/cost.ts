@@ -1,8 +1,9 @@
-export function formatUsdCost(amount: number, isLocal?: boolean | null) {
+export function formatUsdCost(amount: number | null | undefined, isLocal?: boolean | null) {
     if (isLocal) {
-        return "Free (local)";
+        return "$0 API charges (local compute excluded)";
     }
-    return `$${Number(amount || 0).toFixed(4)}`;
+    if (amount == null || !Number.isFinite(amount)) return "Unknown cost";
+    return `$${amount.toFixed(6)}`;
 }
 
 export function analysisModeLabel(mode: unknown) {

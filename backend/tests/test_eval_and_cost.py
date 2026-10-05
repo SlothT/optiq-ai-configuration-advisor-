@@ -46,9 +46,11 @@ def test_failed_runs_get_an_honest_justification() -> None:
         ],
         {"goal": "cheapest"},
     )
-    assert top["model_id"] in {"mistral", "llama3.2"}
-    assert "failed" in justification.lower() or "quality is 0" in justification.lower()
-    assert ranked
+    assert top["model_id"] is None
+    assert top["usable"] is False
+    assert not ranked
+    assert _excluded
+    assert "No tested configuration" in justification
 
 
 def test_retries_on_transient_status() -> None:

@@ -34,10 +34,12 @@ export default function ExperimentRunnerPage() {
     const [projectId, setProjectId] = useState("");
     const [selectedPromptIds, setSelectedPromptIds] = useState<string[]>([]);
     const [taskType, setTaskType] = useState("open_ended");
-    const [selectedModels, setSelectedModels] = useState<string[]>(["auto"]);
-    const [testInput, setTestInput] = useState("Summarize the feedback");
+    const [selectedModels, setSelectedModels] = useState<string[]>([]);
+    const [testInput, setTestInput] = useState("");
     const [batchCases, setBatchCases] = useState<TestCase[] | null>(null);
     const [temperature, setTemperature] = useState("0.2");
+    const [maxOutputTokens, setMaxOutputTokens] = useState(1024);
+    const [budget, setBudget] = useState("");
     const [handoffNotice, setHandoffNotice] = useState<string | null>(null);
     const [message, setMessage] = useState<string | null>(null);
     const [loading, setLoading] = useState(false);
@@ -86,7 +88,7 @@ export default function ExperimentRunnerPage() {
                 return ["auto"];
             }
             const stillValid = current.filter((item) => configured.includes(item));
-            return stillValid.length ? stillValid : (configured.length ? configured.slice(0, 2) : ["auto"]);
+            return stillValid;
         });
     }, []);
 
@@ -102,13 +104,18 @@ export default function ExperimentRunnerPage() {
             setTaskType(requestedTaskType);
         }
         if (requestedPromptId) {
-            setHandoffNotice("Loaded the analyzed prompt from Prompt Analyzer.");
+            setHandoffNotice("Loaded the prompt from Model Advisor. Configure the suggested provider before testing; no calls run until confirmation.");
         }
         if (requestedProjectId) {
             await Promise.all([
                 loadPrompts(activeToken, requestedProjectId, requestedPromptId),
                 loadProviders(activeToken, requestedProjectId),
             ]);
+            if (params.get("model_ids")) {
+                setSelectedModels(params.get("model_ids")!.split(",").filter(Boolean));
+            }
+            const requestedTokens = Number(params.get("max_output_tokens"));
+            if (requestedTokens >= 1 && requestedTokens <= 4096) setMaxOutputTokens(requestedTokens);
         }
     }, [loadPrompts, loadProviders]);
 
@@ -120,7 +127,7 @@ export default function ExperimentRunnerPage() {
     }, [token, loadProjects]);
 
     useEffect(() => {
-        if (!token || !experiment || ["completed", "failed"].includes(experiment.status)) {
+        if (!token || !experiment || ["completed", "failed", "budget_stopped"].includes(experiment.status)) {
             return;
         }
         const timer = window.setInterval(async () => {
@@ -129,12 +136,19 @@ export default function ExperimentRunnerPage() {
             if (latest.status === "completed") {
                 setMessage("Experiment completed. Review the table, then open Recommendations.");
             }
+            if (latest.status === "budget_stopped") {
+                setMessage("Stopped dispatching because the remaining budget could not cover another call. Review partial results.");
+            }
             if (latest.status === "failed") {
                 setMessage(latest.results?.error || "Experiment failed. Check worker logs.");
             }
         }, 2000);
         return () => window.clearInterval(timer);
     }, [token, experiment]);
+
+    useEffect(() => {
+        setEstimate(null);
+    }, [projectId, selectedPromptIds, selectedModels, testInput, batchCases, maxOutputTokens, temperature]);
 
     function toggleModel(modelId: string) {
         setSelectedModels((current) => {
@@ -158,7 +172,7 @@ export default function ExperimentRunnerPage() {
         if (batchCases?.length) {
             return batchCases;
         }
-        return [{ input: testInput.trim() || "Summarize the feedback" }];
+        return testInput.trim() ? [{ input: testInput.trim() }] : [];
     }
 
     async function requestEstimate() {
@@ -178,6 +192,7 @@ export default function ExperimentRunnerPage() {
                 prompt_ids: selectedPromptIds,
                 model_ids: selectedModels,
                 test_inputs: testInputsPayload(),
+                max_output_tokens: maxOutputTokens,
             };
             const response = await apiFetch("/api/v1/experiments/estimate", {
                 token,
@@ -207,8 +222,10 @@ export default function ExperimentRunnerPage() {
                     model_ids: selectedModels,
                     task_type: taskType,
                     test_inputs: testInputsPayload(),
+                max_output_tokens: maxOutputTokens,
                     confirm_cost: true,
-                    temperature: Number(temperature) || 0.2,
+                    budget_usd: budget === "" ? estimate.estimated_cost_usd : Number(budget),
+                    temperature: temperature.trim() === "" ? 0.2 : Number(temperature),
                 }),
             }) as ExperimentSummary;
             setExperiment(response);
@@ -218,6 +235,18 @@ export default function ExperimentRunnerPage() {
             setMessage(error instanceof Error ? error.message : "Experiment run failed");
         } finally {
             setLoading(false);
+        }
+    }
+
+    async function markOutput(rowIndex: number, accepted: boolean) {
+        if (!token || !experiment) return;
+        try {
+            const updated = await apiFetch(`/api/v1/experiments/${experiment.id}/feedback`, {
+                token, method: "POST", body: JSON.stringify({ row_index: rowIndex, accepted }),
+            }) as ExperimentSummary;
+            setExperiment(updated);
+        } catch (error) {
+            setMessage(error instanceof Error ? error.message : "Could not save feedback");
         }
     }
 
@@ -279,7 +308,7 @@ export default function ExperimentRunnerPage() {
                                     }}
                                     className={`rounded-2xl border px-4 py-3 text-left text-sm ${selectedPromptIds.includes(prompt.id) ? "border-accent bg-accent/5" : "border-black/10"}`}
                                 >
-                                    v{prompt.version} · {prompt.task_type} · score {prompt.quality_score}
+                                    v{prompt.version} · {prompt.task_type}
                                 </button>
                             ))}
                             {!prompts.length ? <p className="text-sm text-ink/60">Analyze a prompt first, then send it here.</p> : null}
@@ -296,11 +325,11 @@ export default function ExperimentRunnerPage() {
 
                     <div>
                         <p className="mb-2 text-sm font-medium">Available models</p>
-                        <p className="mb-2 text-sm text-ink/60">Only models from APIs you configured, plus Auto to run those available models.</p>
+                        <p className="mb-2 text-sm text-ink/60">Select the models to test. The all-configured option expands the comparison and its cost; it is not intelligent routing.</p>
                         <div className="grid gap-2">
                             <label className="flex items-center gap-2 rounded-2xl border border-black/10 px-4 py-3 text-sm">
                                 <input type="checkbox" checked={selectedModels.includes("auto")} onChange={() => toggleModel("auto")} />
-                                Auto (run available models)
+                                All configured models (up to 8)
                             </label>
                             <select
                                 multiple
@@ -308,7 +337,7 @@ export default function ExperimentRunnerPage() {
                                 value={selectedModels.filter((item) => item !== "auto")}
                                 onChange={(event) => {
                                     const values = Array.from(event.target.selectedOptions).map((option) => option.value);
-                                    setSelectedModels(values.length ? values : ["auto"]);
+                                    setSelectedModels(values);
                                 }}
                             >
                                 {availableModels.map((model) => (
@@ -320,6 +349,7 @@ export default function ExperimentRunnerPage() {
                             {!availableModels.length ? (
                                 <p className="text-sm text-ink/60">No models listed yet. Save a provider in Settings, and for Ollama pull at least one model.</p>
                             ) : null}
+                            {selectedModels.filter((id) => id !== "auto" && !availableModels.some((model) => model.id === id)).map((id) => <p key={id} className="text-sm text-red-700">{id} is selected but not configured. Add its provider in Settings or choose another model.</p>)}
                             {providerMessages.map((item) => <p key={item} className="text-sm text-red-700">{item}</p>)}
                         </div>
                     </div>
@@ -330,20 +360,24 @@ export default function ExperimentRunnerPage() {
                             className="rounded-2xl border border-black/10 px-4 py-3"
                             type="number"
                             min="0"
-                            max="2"
+                            max="1"
                             step="0.1"
                             value={temperature}
                             onChange={(event) => setTemperature(event.target.value)}
                         />
-                        <span className="font-normal text-ink/60">Default 0.2 (range 0–2; higher = more random).</span>
+                        <span className="font-normal text-ink/60">Default 0.2 (range 0–1; higher = more random).</span>
                     </label>
 
                     <label className="grid gap-2 text-sm font-medium">
-                        Sample user request
+                        Maximum output tokens per call
+                        <input className="rounded-2xl border border-black/10 px-4 py-3" type="number" min="1" max="4096" value={maxOutputTokens} onChange={(event) => setMaxOutputTokens(Number(event.target.value))} />
+                    </label>
+                    <label className="grid gap-2 text-sm font-medium">
+                        Additional test input (optional)
                         <span className="font-normal text-ink/60">This is extra test input sent with the analyzed prompt, not a replacement for it.</span>
                         <textarea
                             className="min-h-32 rounded-2xl border border-black/10 px-4 py-3"
-                            placeholder="Type a sample user request, e.g. Summarize the feedback."
+                            placeholder="Leave empty to test the saved prompt exactly as written."
                             value={testInput}
                             onChange={(event) => {
                                 setTestInput(event.target.value);
@@ -412,12 +446,19 @@ export default function ExperimentRunnerPage() {
                                     </tbody>
                                 </table>
                             </div>
-                            {rows[0]?.raw_output ? (
-                                <pre className="max-h-48 overflow-auto rounded-2xl bg-sand p-4 text-xs">{rows[0].raw_output}</pre>
-                            ) : null}
+                            <p className="text-sm text-ink/60">Subjective outputs need your review. A single test is not a reliability guarantee. Unknown failed-call charges remain reserved.</p>
+                            {rows.map((row, index) => <div key={`output-${index}`} className="rounded-2xl border border-black/10 p-4">
+                                <h3 className="font-semibold">{row.model_id} · case {row.input_index + 1}</h3>
+                                <pre className="mt-3 max-h-80 whitespace-pre-wrap overflow-auto text-sm">{row.raw_output || row.error || "No output"}</pre>
+                                {!row.error && ["completed", "budget_stopped", "failed"].includes(experiment.status) ? <div className="mt-3 flex flex-wrap items-center gap-3 text-sm">
+                                    <button className="rounded-full border px-3 py-2" type="button" onClick={() => void markOutput(index, true)}>Meets my need</button>
+                                    <button className="rounded-full border px-3 py-2" type="button" onClick={() => void markOutput(index, false)}>Does not meet my need</button>
+                                    {experiment.results?.user_feedback?.[String(index)] ? <span>{experiment.results.user_feedback[String(index)].accepted ? "Accepted" : "Rejected"} for this output only</span> : null}
+                                </div> : null}
+                            </div>)}
                         </div>
                     ) : (
-                        <p className="text-sm text-ink/60">Estimate cost, confirm the modal, then this panel will poll until the RQ worker finishes.</p>
+                        <p className="text-sm text-ink/60">Estimate cost, confirm the modal, then this panel will poll until the experiment finishes.</p>
                     )}
                 </div>
             </div>
@@ -430,6 +471,11 @@ export default function ExperimentRunnerPage() {
                             Estimated {formatUsdCost(estimate.estimated_cost_usd, estimate.cost_is_local)} across {estimate.estimated_rows} generation(s)
                             {estimate.resolved_model_ids ? ` using ${estimate.resolved_model_ids.join(", ")}` : ""}.
                         </p>
+                        <p className="mt-2 text-sm text-ink/60">Maximum output tokens: {maxOutputTokens}. No automatic retries or paid judges. This controls dispatch; provider billing can differ.</p>
+                        <label className="mt-4 grid gap-2 text-sm">Experiment budget (USD)
+                            <input className="rounded-xl border p-3" type="number" min="0" step="0.000001" placeholder={String(estimate.estimated_cost_usd)} value={budget} onChange={(event) => setBudget(event.target.value)} />
+                            <span className="text-ink/60">Leave empty to use the displayed reservation. Each experiment has its own budget.</span>
+                        </label>
                         <div className="mt-6 flex gap-3">
                             <button className="rounded-full bg-ink px-5 py-3 text-sm font-medium text-paper" onClick={confirmRun} type="button">Confirm and queue</button>
                             <button className="rounded-full border border-black/15 px-5 py-3 text-sm" onClick={() => setEstimate(null)} type="button">Cancel</button>

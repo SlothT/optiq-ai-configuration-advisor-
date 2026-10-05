@@ -1,11 +1,19 @@
 from __future__ import annotations
 
+from uuid import uuid4
+
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
+from app.core.config import settings
 from app.core.deps import db_session, get_current_user, get_project_for_user
 from app.models.domain import Experiment, Prompt, User
-from app.schemas.domain import ExperimentEstimateRequest, ExperimentRunRequest, ExperimentSummary
+from app.schemas.domain import (
+    ExperimentEstimateRequest,
+    ExperimentFeedbackRequest,
+    ExperimentRunRequest,
+    ExperimentSummary,
+)
 from app.services.auto import expand_model_ids
 from app.services.evaluation import parse_test_inputs
 from app.services.phase1 import build_experiment_summary, estimate_experiment_cost
@@ -39,6 +47,7 @@ def estimate_experiment_route(
             prompt_ids=request.prompt_ids,
             model_ids=model_ids,
             test_inputs=test_inputs,
+            max_output_tokens=request.max_output_tokens,
         )
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
@@ -70,6 +79,7 @@ def run_experiment_route(
             prompt_ids=request.prompt_ids,
             model_ids=model_ids,
             test_inputs=test_inputs,
+            max_output_tokens=request.max_output_tokens,
         )
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
@@ -82,6 +92,11 @@ def run_experiment_route(
             "message": "Confirm the cost estimate to queue the experiment",
         }
 
+    budget = request.budget_usd if request.budget_usd is not None else estimate["estimated_cost_usd"]
+    if budget + 1e-9 < estimate["estimated_cost_usd"]:
+        raise HTTPException(status_code=422, detail="Budget is below the reserved estimate. Reduce models, cases, or output tokens.")
+    temperature = request.temperature if request.temperature is not None else 0.2
+    job_id = "inline" if settings.job_backend == "thread" else uuid4().hex
     experiment = Experiment(
         project_id=request.project_id,
         status="queued",
@@ -89,16 +104,16 @@ def run_experiment_route(
         prompt_ids_json=request.prompt_ids,
         model_ids_json=model_ids,
         test_inputs_json=test_inputs,
-        results_json={"label": request.label, "temperature": request.temperature or 0.2},
+        results_json={"label": request.label, "temperature": temperature, "rq_job_id": job_id,
+                      "max_output_tokens": request.max_output_tokens, "budget_usd": budget,
+                      "estimate": estimate, "reserved_cost_usd": estimate["estimated_cost_usd"]},
     )
     db.add(experiment)
     db.commit()
     db.refresh(experiment)
 
     try:
-        job_id = enqueue_experiment(experiment.id, request.temperature or 0.2)
-        experiment.results_json = {**(experiment.results_json or {}), "rq_job_id": job_id}
-        db.commit()
+        enqueue_experiment(experiment.id, temperature, job_id=job_id)
         db.refresh(experiment)
     except Exception as exc:
         experiment.status = "failed"
@@ -172,3 +187,27 @@ def get_experiment_metrics(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Experiment not found")
     get_project_for_user(experiment.project_id, current_user, db)
     return experiment.results_json or {}
+
+
+@router.post("/{experiment_id}/feedback")
+def record_experiment_feedback(
+    experiment_id: str,
+    request: ExperimentFeedbackRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(db_session),
+) -> dict:
+    experiment = db.query(Experiment).filter(Experiment.id == experiment_id).one_or_none()
+    if not experiment:
+        raise HTTPException(status_code=404, detail="Experiment not found")
+    get_project_for_user(experiment.project_id, current_user, db)
+    if experiment.status not in {"completed", "budget_stopped", "failed"}:
+        raise HTTPException(status_code=422, detail="Wait until execution finishes before reviewing outputs")
+    payload = dict(experiment.results_json or {})
+    rows = payload.get("rows") or []
+    if request.row_index >= len(rows) or rows[request.row_index].get("error"):
+        raise HTTPException(status_code=422, detail="Select a generated output without errors")
+    feedback = dict(payload.get("user_feedback") or {})
+    feedback[str(request.row_index)] = {"accepted": request.accepted, "scope": "observed_output_only"}
+    experiment.results_json = {**payload, "user_feedback": feedback}
+    db.commit()
+    return build_experiment_summary(experiment)

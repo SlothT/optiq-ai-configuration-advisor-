@@ -2,23 +2,23 @@ import Link from "next/link";
 
 const cards = [
     {
-        title: "Prompt Analyzer",
-        tag: "AI Review",
-        body: "Score prompt quality, inspect strengths & weaknesses, compute token counts, and estimate costs across LLM providers.",
+        title: "Model Advisor",
+        tag: "Advice before spending",
+        body: "Paste a prompt to receive an affordable starting model, explanations, and estimated API costs.",
         href: "/prompt-analyzer",
-        action: "Analyze Prompt →",
+        action: "Get Advice →",
     },
     {
         title: "Experiment Runner",
         tag: "Multi-Model Benchmarking",
-        body: "Run live side-by-side evaluations across OpenAI, Anthropic, Gemini, and local Ollama models with reference answers.",
+        body: "Optionally compare outputs using your configured providers after reviewing the scope and budget.",
         href: "/experiment-runner",
         action: "Run Experiment →",
     },
     {
-        title: "MLflow Tracking Dashboard",
+        title: "Comparison History",
         tag: "Auditability & Metrics",
-        body: "Inspect experiment metadata, metrics, latency distributions, and artifact records stored securely in MLflow.",
+        body: "Inspect saved results, costs, failures, and optional tracking records.",
         href: "/dashboard",
         action: "View Dashboard →",
     },
@@ -26,9 +26,9 @@ const cards = [
 
 const metrics = [
     { label: "Supported Providers", value: "4 (OpenAI, Anthropic, Gemini, Ollama)" },
-    { label: "Eval Engine", value: "Ragas + LLM-as-Judge" },
-    { label: "Analysis Speed", value: "< 5s p95 latency" },
-    { label: "Credentials", value: "AES-256 Fernet Encrypted" },
+    { label: "Advice", value: "Local rules · no paid model calls" },
+    { label: "Verification", value: "Optional · budget controlled" },
+    { label: "Credentials", value: "Encrypted provider keys" },
 ];
 
 export default function HomePage() {
@@ -37,17 +37,17 @@ export default function HomePage() {
             <section className="grid gap-8 lg:grid-cols-[1.3fr_0.7fr]">
                 <div className="rounded-[2rem] border border-black/5 bg-white/90 p-8 shadow-panel">
                     <span className="inline-block rounded-full bg-accent/10 px-3.5 py-1 text-xs font-semibold uppercase tracking-[0.2em] text-accent">
-                        Pre-Deployment LLM Checkpoint
+                        Choose before you spend
                     </span>
                     <h2 className="mt-4 max-w-2xl text-4xl font-bold tracking-tight leading-tight">
-                        Stop guessing your prompt quality and model choice.
+                        Does your prompt need an expensive model?
                     </h2>
                     <p className="mt-4 max-w-2xl text-base text-ink/70 leading-relaxed">
-                        Optiq actively analyzes prompts, benchmarks models against your hard cost & latency constraints, and recommends the optimal model configuration before production release.
+                        Optiq suggests an affordable LLM for your prompt, explains the trade-offs, and lets you optionally test alternatives. Advice requires no provider keys or dataset.
                     </p>
                     <div className="mt-8 flex flex-wrap items-center gap-3">
                         <Link className="rounded-full bg-ink px-6 py-3.5 text-sm font-semibold text-paper shadow transition hover:bg-ink/90 hover:-translate-y-0.5" href="/prompt-analyzer">
-                            Start Prompt Analysis
+                            Find a Starting Model
                         </Link>
                         <Link className="rounded-full border border-black/15 bg-white px-6 py-3.5 text-sm font-semibold transition hover:border-accent hover:text-accent hover:-translate-y-0.5" href="/settings">
                             Configure Provider Keys

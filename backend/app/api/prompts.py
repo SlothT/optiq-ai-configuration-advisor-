@@ -15,7 +15,7 @@ router = APIRouter(prefix="/api/v1/prompts", tags=["prompts"])
 async def analyze_prompt_route(
     project_id: str = Form(...),
     task_type: str = Form(...),
-    judge_model: str = Form(...),
+    judge_model: str = Form("local"),
     text: str | None = Form(None),
     source_prompt_id: str | None = Form(None),
     files: list[UploadFile] = File(default=[]),

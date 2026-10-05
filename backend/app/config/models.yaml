@@ -1,6 +1,5 @@
-# Optiq model registry — add models here without code changes.
-# Pricing is USD per 1M tokens (input / output). Ollama models are free (null pricing).
-
+# Curated starter registry; API token rates in USD per million.
+# Ollama has zero API charges, not zero operating cost.
 providers:
   openai:
     adapter: openai
@@ -13,8 +12,15 @@ providers:
         default_temperature: 0.7
         max_tokens: 4096
         pricing:
-          input_per_1m: 2.50
-          output_per_1m: 10.00
+          input_per_1m: 2.5
+          output_per_1m: 10.0
+        advice_tier: balanced
+        supported_tasks:
+        - writing
+        - summarization
+        - extraction
+        - classification
+        context_window: 128000
       gpt-4o-mini:
         display_name: GPT-4o Mini
         enabled: true
@@ -22,8 +28,16 @@ providers:
         max_tokens: 4096
         pricing:
           input_per_1m: 0.15
-          output_per_1m: 0.60
-
+          output_per_1m: 0.6
+        advice_tier: budget
+        supported_tasks:
+        - writing
+        - summarization
+        - extraction
+        - classification
+        context_window: 128000
+    pricing_source: https://developers.openai.com/api/docs/models
+    pricing_checked_at: '2026-10-05'
   ollama:
     adapter: ollama
     requires_api_key: false
@@ -35,19 +49,39 @@ providers:
         default_temperature: 0.7
         max_tokens: 4096
         pricing: null
+        advice_tier: budget
+        supported_tasks:
+        - writing
+        - summarization
+        - extraction
+        - classification
+        context_window: 8192
       mistral:
         display_name: Mistral
         enabled: true
         default_temperature: 0.7
         max_tokens: 4096
         pricing: null
+        advice_tier: budget
+        supported_tasks:
+        - writing
+        - summarization
+        - extraction
+        - classification
+        context_window: 8192
       qwen2.5:
         display_name: Qwen 2.5
         enabled: true
         default_temperature: 0.7
         max_tokens: 4096
         pricing: null
-
+        advice_tier: budget
+        supported_tasks:
+        - writing
+        - summarization
+        - extraction
+        - classification
+        context_window: 8192
   anthropic:
     adapter: anthropic
     requires_api_key: true
@@ -55,21 +89,56 @@ providers:
     models:
       claude-sonnet-4-20250514:
         display_name: Claude Sonnet 4
-        enabled: true
+        enabled: false
         default_temperature: 0.7
         max_tokens: 4096
-        pricing:
-          input_per_1m: 3.00
-          output_per_1m: 15.00
+        pricing: &id001
+          input_per_1m: 3.0
+          output_per_1m: 15.0
+        advice_tier: balanced
+        supported_tasks: &id002
+        - writing
+        - summarization
+        - extraction
+        - classification
+        context_window: 200000
       claude-opus-4-20250514:
         display_name: Claude Opus 4
+        enabled: false
+        default_temperature: 0.7
+        max_tokens: 4096
+        pricing:
+          input_per_1m: 15.0
+          output_per_1m: 75.0
+        advice_tier: premium
+        supported_tasks: &id003
+        - writing
+        - summarization
+        - extraction
+        - classification
+        context_window: 200000
+      claude-sonnet-4-6:
+        display_name: Claude Sonnet 4.6
+        enabled: true
+        default_temperature: 0.7
+        max_tokens: 4096
+        pricing: *id001
+        advice_tier: balanced
+        supported_tasks: *id002
+        context_window: 200000
+      claude-opus-4-6:
+        display_name: Claude Opus 4.6
         enabled: true
         default_temperature: 0.7
         max_tokens: 4096
         pricing:
-          input_per_1m: 15.00
-          output_per_1m: 75.00
-
+          input_per_1m: 5.0
+          output_per_1m: 25.0
+        advice_tier: premium
+        supported_tasks: *id003
+        context_window: 200000
+    pricing_source: https://platform.claude.com/docs/en/about-claude/pricing
+    pricing_checked_at: '2026-10-05'
   google:
     adapter: gemini
     requires_api_key: true
@@ -77,9 +146,30 @@ providers:
     models:
       gemini-2.0-flash:
         display_name: Gemini 2.0 Flash
+        enabled: false
+        default_temperature: 0.7
+        max_tokens: 4096
+        pricing: &id004
+          input_per_1m: 0.1
+          output_per_1m: 0.4
+        advice_tier: budget
+        supported_tasks: &id005
+        - writing
+        - summarization
+        - extraction
+        - classification
+        context_window: 1048576
+      gemini-2.5-flash-lite:
+        display_name: Gemini 2.5 Flash-Lite
         enabled: true
         default_temperature: 0.7
         max_tokens: 4096
-        pricing:
-          input_per_1m: 0.10
-          output_per_1m: 0.40
+        pricing: *id004
+        advice_tier: budget
+        supported_tasks: *id005
+        context_window: 1048576
+    pricing_source: https://ai.google.dev/gemini-api/docs/pricing
+    pricing_checked_at: '2026-10-05'
+registry_version: 2026-10-05.1
+capability_basis: Curated task tiers, not measured quality scores; suggestions require
+  user validation.

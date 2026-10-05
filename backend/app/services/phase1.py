@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import json
+import math
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -14,11 +15,10 @@ from sqlalchemy.orm import Session
 from app.adapters.base import ProviderResolution
 from app.adapters.factory import AdapterFactory, resolve_provider
 from app.adapters.ollama_adapter import list_installed_ollama_models, normalize_ollama_base_url
+from app.adapters.retries import single_attempt
 from app.config.model_registry import get_model, get_provider_config, list_models, model_is_local, resolve_model_info
 from app.core.config import settings
-from app.core.crypto import decrypt_text
 from app.models.domain import Experiment, Prompt, ProviderKey, Recommendation
-from app.services.auto import AUTO_MODEL_ID, pick_auto_model
 from app.services.evaluation import aggregate_rows, evaluate_row, per_model_summary
 
 TASK_KEYWORDS = {
@@ -63,14 +63,20 @@ def estimate_tokens(text: str, model_id: str | None = None) -> int:
     try:
         encoding = tiktoken.encoding_for_model(model_id or "gpt-4o-mini")
     except Exception:
-        encoding = tiktoken.get_encoding("cl100k_base")
+        try:
+            encoding = tiktoken.get_encoding("cl100k_base")
+        except Exception:
+            # Tokenizer data may not be cached on an offline contributor machine.
+            return math.ceil(len(text) / 4)
     return len(encoding.encode(text))
 
 
 def estimate_cost(model_id: str, input_tokens: int, output_tokens: int) -> float:
     model = resolve_model_info(model_id) or get_model(model_id)
-    if not model or not model.pricing:
+    if model and model.provider == "ollama":
         return 0.0
+    if not model or not model.pricing:
+        raise ValueError(f"Pricing is unknown for {model_id}; it cannot be treated as free")
     input_cost = (input_tokens / 1_000_000) * model.pricing.input_per_1m
     output_cost = (output_tokens / 1_000_000) * model.pricing.output_per_1m
     return round(input_cost + output_cost, 6)
@@ -248,23 +254,6 @@ def _resolve_prompt_text(file_name: str | None, raw_bytes: bytes, provided_text:
     return (provided_text or "").strip()
 
 
-def _judge_prompt_with_model(db: Session, project_id: str, judge_model: str, prompt_text: str) -> tuple[str | None, str | None, str | None]:
-    try:
-        resolved_model = pick_auto_model(db, project_id) if judge_model.lower() == AUTO_MODEL_ID else judge_model
-        resolution = _provider_key_for_model(db, project_id, resolved_model)
-        adapter = AdapterFactory.from_resolution(resolution)
-        result = adapter.generate(
-            model_id=resolved_model,
-            prompt=prompt_text,
-            temperature=0.2,
-            max_tokens=512,
-            system="You are a concise prompt quality judge.",
-        )
-        return result.text, resolved_model, None
-    except Exception as exc:
-        return None, "fallback", str(exc)
-
-
 def analyze_prompt(
     db: Session,
     *,
@@ -280,46 +269,16 @@ def analyze_prompt(
     version = _prompt_family_version(db, project_id, source_prompt_id)
     scored_prompt = (user_prompt or prompt_text).strip()
     base_score, strengths, weaknesses, suggestions = analyze_prompt_text(scored_prompt, task_type, context_text)
-    cost_model = judge_model
-    if judge_model.lower() == AUTO_MODEL_ID:
-        try:
-            cost_model = pick_auto_model(db, project_id)
-        except Exception:
-            cost_model = judge_model
-    prompt_tokens = estimate_tokens(scored_prompt, cost_model)
-    context_tokens = estimate_tokens(context_text, cost_model) if context_text else 0
-    token_count = estimate_tokens(prompt_text, cost_model)
-    estimated_cost = estimate_cost(cost_model, token_count, 256)
-    cost_local = model_is_local(cost_model)
-
-    judge_prompt = (
-        "Evaluate the following user prompt for clarity, structure, edge cases, and failure behavior. "
-        "If context documents are attached, judge whether the prompt uses that context well. "
-        "Return JSON only with keys quality_score (0-100), strengths, weaknesses, "
-        "and suggested_improvements (specific, actionable strings).\n\n"
-        f"Task type: {task_type}\n\nPrompt:\n{prompt_text}"
-    )
-    judge_output, mode, judge_error = _judge_prompt_with_model(db, project_id, judge_model, judge_prompt)
-    resolved_judge = cost_model if mode == "fallback" else (mode or cost_model)
-    analysis_mode = "fallback"
-    if judge_output:
-        analysis_mode = "live"
-        parsed = _extract_json_object(judge_output)
-        if parsed:
-            judge_score = parsed.get("quality_score")
-            if isinstance(judge_score, int | float):
-                base_score = round((base_score + max(0.0, min(100.0, float(judge_score)))) / 2, 1)
-            strengths = list(dict.fromkeys(strengths + _string_list(parsed.get("strengths"))))
-            weaknesses = list(dict.fromkeys(weaknesses + _string_list(parsed.get("weaknesses"))))
-            judge_suggestions = _string_list(parsed.get("suggested_improvements"))
-            suggestions = list(dict.fromkeys(suggestions + judge_suggestions))
-        else:
-            snippet = judge_output[:240].strip()
-            suggestions = list(dict.fromkeys(suggestions + [f"Judge feedback: {snippet}"]))
-        strengths.append("Judge model was available for live feedback")
-        base_score = min(100.0, base_score + 5.0)
-    elif mode == "fallback":
-        strengths.append("Used deterministic fallback analysis")
+    # Prompt review is local and deterministic. No advisory judge calls are billed.
+    cost_model = "local-rules"
+    prompt_tokens = estimate_tokens(scored_prompt)
+    context_tokens = estimate_tokens(context_text) if context_text else 0
+    token_count = estimate_tokens(prompt_text)
+    estimated_cost = 0.0
+    cost_local = True
+    judge_output, judge_error = None, None
+    resolved_judge = None
+    analysis_mode = "local_rules"
 
     analysis = PromptAnalysis(
         quality_score=base_score,
@@ -366,11 +325,8 @@ def _compose_generation_input(prompt_text: str, test_input: dict[str, Any] | Non
         return prompt_text
     pieces = [prompt_text.strip(), "", f"Input: {test_input.get('input', '')}".strip()]
     context = test_input.get("context")
-    reference = test_input.get("reference_answer")
     if context:
         pieces.extend([f"Context: {context}"])
-    if reference:
-        pieces.extend([f"Reference Answer: {reference}"])
     return "\n".join(piece for piece in pieces if piece is not None)
 
 
@@ -381,6 +337,7 @@ def estimate_experiment_cost(
     prompt_ids: list[str],
     model_ids: list[str],
     test_inputs: list[dict[str, Any]],
+    max_output_tokens: int = 1024,
 ) -> dict[str, Any]:
     prompts = (
         db.query(Prompt)
@@ -395,25 +352,34 @@ def estimate_experiment_cost(
     total = 0.0
     breakdown: list[dict[str, Any]] = []
     for model_id in model_ids:
+        resolution = _provider_key_for_model(db, project_id, model_id)
+        AdapterFactory.from_resolution(resolution)  # Validate credentials before queueing.
         model_cost = 0.0
         for prompt in prompts:
             for test_input in cases:
                 generation_input = _compose_generation_input(prompt.raw_text, test_input)
-                input_tokens = estimate_tokens(generation_input, model_id)
-                output_tokens = min(prompt.estimated_tokens or 256, 512)
-                model_cost += estimate_cost(model_id, input_tokens, output_tokens)
+                input_tokens = math.ceil(estimate_tokens(generation_input, model_id) * 1.25) + 64
+                model = resolution.model_config
+                output_tokens = min(max_output_tokens or model.max_tokens, model.max_tokens)
+                model_cost += 0.0 if model.provider == "ollama" else estimate_cost(model_id, input_tokens, output_tokens)
         breakdown.append({
             "model_id": model_id,
             "estimated_cost_usd": round(model_cost, 6),
-            "cost_is_local": model_is_local(model_id),
+            "cost_is_local": resolution.provider_name == "ollama",
+            "pricing_source": resolution.model_config.pricing_source,
+            "pricing_checked_at": resolution.model_config.pricing_checked_at,
+            "input_per_1m": resolution.model_config.pricing.input_per_1m if resolution.model_config.pricing else None,
+            "output_per_1m": resolution.model_config.pricing.output_per_1m if resolution.model_config.pricing else None,
         })
         total += model_cost
-    local_only = bool(model_ids) and all(model_is_local(model_id) for model_id in model_ids)
+    local_only = bool(breakdown) and all(item["cost_is_local"] for item in breakdown)
     return {
         "estimated_cost_usd": round(total, 6),
         "estimated_rows": estimated_rows,
         "breakdown": breakdown,
         "cost_is_local": local_only,
+        "estimate_basis": "Maximum output tokens, input-token buffer; one call per case, no hidden evaluation or retries",
+        "billing_note": "Dispatch estimate, not a provider invoice guarantee; failed calls may have unreported charges",
     }
 
 
@@ -426,6 +392,9 @@ def run_experiment(
     task_type: str,
     test_inputs: list[dict[str, Any]],
     temperature: float,
+    max_output_tokens: int = 1024,
+    budget_usd: float | None = None,
+    record_progress=None,
 ) -> ExperimentRunResult:
     prompts = (
         db.query(Prompt)
@@ -438,13 +407,12 @@ def run_experiment(
         raise ValueError(f"Prompt(s) not found: {', '.join(missing)}")
 
     rows: list[dict[str, Any]] = []
+    committed_cost = 0.0
+    stopped = False
     for model_id in model_ids:
         resolution = _provider_key_for_model(db, project_id, model_id)
         adapter = AdapterFactory.from_resolution(resolution)
-        openai_key = None
-        if resolution.provider_name == "openai" and resolution.provider_key and resolution.provider_key.encrypted_api_key:
-            openai_key = decrypt_text(resolution.provider_key.encrypted_api_key)
-        max_tokens = int(getattr(resolution.model_config, "max_tokens", 1024) or 1024)
+        max_tokens = min(max_output_tokens, int(getattr(resolution.model_config, "max_tokens", 1024) or 1024))
         for prompt in prompts:
             for index, test_input in enumerate(test_inputs or [{}]):
                 start = time.perf_counter()
@@ -453,13 +421,22 @@ def run_experiment(
                 usage_in: int | None = None
                 usage_out: int | None = None
                 generation_input = _compose_generation_input(prompt.raw_text, test_input)
+                reserved_cost = estimate_cost(
+                    model_id, math.ceil(estimate_tokens(generation_input, model_id) * 1.25) + 64, max_tokens,
+                ) if resolution.provider_name != "ollama" else 0.0
+                if budget_usd is not None and committed_cost + reserved_cost > budget_usd + 1e-9:
+                    stopped = True
+                    break
+                if record_progress:
+                    record_progress(rows, committed_cost, reserved_cost)
                 try:
-                    generated = adapter.generate(
-                        model_id=model_id,
-                        prompt=generation_input,
-                        temperature=temperature,
-                        max_tokens=max_tokens,
-                    )
+                    with single_attempt():
+                        generated = adapter.generate(
+                            model_id=model_id,
+                            prompt=generation_input,
+                            temperature=temperature,
+                            max_tokens=max_tokens,
+                        )
                     output_text = generated.text
                     usage_in = generated.input_tokens
                     usage_out = generated.output_tokens
@@ -468,7 +445,11 @@ def run_experiment(
                 elapsed_ms = (time.perf_counter() - start) * 1000.0
                 input_tokens = usage_in if usage_in is not None else estimate_tokens(generation_input, model_id)
                 output_tokens = usage_out if usage_out is not None else estimate_tokens(output_text or error_message or "", model_id)
-                cost_usd = adapter.estimate_cost(model_id, input_tokens, output_tokens)
+                cost_usd = None if error_message else (
+                    0.0 if resolution.provider_name == "ollama" else estimate_cost(model_id, input_tokens, output_tokens)
+                )
+                # Unknown failure charges retain their full reservation.
+                committed_cost += reserved_cost if cost_usd is None else cost_usd
                 metrics = (
                     evaluate_row(
                         prompt_text=prompt.raw_text,
@@ -476,7 +457,7 @@ def run_experiment(
                         output_text=output_text,
                         task_type=task_type or prompt.task_type,
                         adapter=adapter,
-                        openai_key=openai_key,
+                        openai_key=None,
                     )
                     if not error_message
                     else {"quality_score": None, "accuracy": None, "answer_relevancy": None, "faithfulness": None, "eval_engine": "skipped"}
@@ -491,8 +472,13 @@ def run_experiment(
                         "input": test_input,
                         "raw_output": output_text,
                         "latency_ms": round(elapsed_ms, 2),
-                        "input_tokens": input_tokens,
-                        "output_tokens": output_tokens,
+                        "input_tokens": input_tokens if not error_message else 0,
+                        "output_tokens": output_tokens if not error_message else 0,
+                        "usage_source": "provider" if usage_in is not None and usage_out is not None else "estimated",
+                        "reserved_cost_usd": reserved_cost,
+                        "cost_status": "unresolved" if error_message else "usage_estimate",
+                        "max_output_tokens": max_tokens,
+                        "temperature": temperature,
                         "cost_usd": cost_usd,
                         "cost_is_local": model_is_local(model_id) or resolution.provider_name == "ollama",
                         **metrics,
@@ -500,8 +486,21 @@ def run_experiment(
                     }
                 )
 
+                if record_progress:
+                    record_progress(rows, committed_cost, 0.0)
+            if stopped:
+                break
+        if stopped:
+            break
+
     summary = aggregate_rows(rows)
     summary["per_model"] = per_model_summary(rows)
+    summary["budget_usd"] = budget_usd
+    summary["committed_cost_usd"] = round(committed_cost, 6)
+    summary["budget_stopped"] = stopped
+    summary["advice_cost_usd"] = 0.0
+    summary["evaluation_cost_usd"] = 0.0
+    summary["billing_note"] = "No automatic retries or paid judges; estimates are not invoices and failed-call charges may be unresolved."
     return ExperimentRunResult(rows=rows, summary=summary, prompts=prompts)
 
 
@@ -582,11 +581,23 @@ def score_recommendations(options: list[dict[str, Any]], request: dict[str, Any]
 
     for option in options:
         reasons: list[str] = []
-        if request.get("max_cost") is not None and option.get("cost_usd", 0.0) > request["max_cost"]:
+        if option.get("failed") or option.get("failed_rows", 0):
+            reasons.append("generation failed for one or more cases")
+        if option.get("cost_usd") is None:
+            reasons.append("unknown cost")
+        if request.get("goal") == "fastest" and option.get("latency_ms") is None:
+            reasons.append("unknown latency")
+        if request.get("goal") == "highest_quality" and option.get("quality_score") is None:
+            reasons.append("unknown output quality; review outputs or supply references")
+        if request.get("max_cost") is not None and option.get("cost_usd") is not None and option["cost_usd"] > request["max_cost"]:
             reasons.append("exceeds max cost")
-        if request.get("max_latency_ms") is not None and option.get("latency_ms", 0.0) > request["max_latency_ms"]:
+        if request.get("max_latency_ms") is not None and option.get("latency_ms") is None:
+            reasons.append("unknown latency")
+        if request.get("max_latency_ms") is not None and option.get("latency_ms") is not None and option["latency_ms"] > request["max_latency_ms"]:
             reasons.append("exceeds max latency")
-        if request.get("min_quality_score") is not None and (option.get("quality_score") or 0.0) < request["min_quality_score"]:
+        if request.get("min_quality_score") is not None and option.get("quality_score") is None:
+            reasons.append("unknown output quality")
+        if request.get("min_quality_score") is not None and option.get("quality_score") is not None and option["quality_score"] < request["min_quality_score"]:
             reasons.append("below minimum quality score")
         if request.get("requires_structured_json") and not option.get("structured_output", False):
             reasons.append("structured JSON required")
@@ -597,10 +608,13 @@ def score_recommendations(options: list[dict[str, Any]], request: dict[str, Any]
             viable.append(option)
 
     if not viable:
-        if options:
-            viable = [max(options, key=lambda row: row.get("quality_score") or 0.0)]
-        else:
-            raise ValueError("No candidate options available")
+        outcome = "insufficient_evidence" if not options or any(
+            any("unknown" in reason for reason in item["reasons"]) for item in excluded
+        ) else "no_feasible_configuration"
+        return [], excluded, {"model_id": None, "usable": False, "outcome": outcome}, (
+            "Insufficient evidence to select a model." if outcome == "insufficient_evidence"
+            else "No tested configuration meets all requirements. Review the exclusions."
+        )
 
     max_cost = max((option.get("cost_usd") or 0.0) for option in viable) or 1.0
     max_latency = max((option.get("latency_ms") or 0.0) for option in viable) or 1.0
@@ -628,24 +642,25 @@ def score_recommendations(options: list[dict[str, Any]], request: dict[str, Any]
         )
         ranked.append({**option, "overall_score": round(score * 100.0, 2)})
 
-    ranked.sort(key=lambda row: row["overall_score"], reverse=True)
-    top = ranked[0]
-    if all(option.get("failed") for option in ranked):
+    if request.get("goal") == "cheapest":
+        ranked.sort(key=lambda row: row["cost_usd"])
+    elif request.get("goal") == "fastest":
+        ranked.sort(key=lambda row: row.get("latency_ms") or 0)
+    elif request.get("goal") == "highest_quality":
+        ranked.sort(key=lambda row: row["quality_score"], reverse=True)
+    else:
+        ranked.sort(key=lambda row: row["overall_score"], reverse=True)
+    top = {**ranked[0], "usable": True, "outcome": "tested_on_supplied_cases"}
+    if top.get("quality_score") is None:
         justification = (
-            f"{top.get('model_id')} is listed first, but every compared run failed. "
-            "Fix the model errors in Experiment Runner before trusting this ranking."
-        )
-    elif all((option.get("quality_score") or 0) == 0 for option in ranked) and all(
-        (option.get("cost_usd") or 0) == 0 for option in ranked
-    ):
-        justification = (
-            f"{top.get('model_id')} ranks first on the selected basis, but quality is 0 and cost is $0. "
-            "This usually means the experiment generations failed or only local models ran."
+            f"Selected {top.get('model_id')} on the requested observed cost/latency basis. "
+            "Output quality is unscored; review the outputs before choosing. A single comparison is not a reliability guarantee."
         )
     else:
         justification = (
-            f"Selected {top.get('model_id')} because it balances quality ({top.get('quality_score')}) "
-            f"with latency ({top.get('latency_ms')} ms) and cost (${top.get('cost_usd')})."
+            f"Selected {top.get('model_id')} on the requested basis after hard requirements. "
+            f"Reference-check score: {top.get('quality_score')}; observed mean latency: {top.get('latency_ms')} ms; "
+            f"mean API cost per case: ${top.get('cost_usd')}. This evidence applies only to the supplied cases."
         )
     return ranked, excluded, top, justification
 

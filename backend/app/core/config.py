@@ -1,9 +1,14 @@
+import os
 from pathlib import Path
+from typing import Literal
 
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 def _env_files() -> tuple[str, ...]:
+    if os.environ.get("OPTIQ_ENV_FILE"):
+        return (os.environ["OPTIQ_ENV_FILE"],)
     here = Path(__file__).resolve()
     candidates = [
         here.parents[2] / ".env",  # /app/.env in Docker; backend/.env locally
@@ -18,10 +23,13 @@ class Settings(BaseSettings):
 
     app_name: str = "Optiq"
     debug: bool = False
+    job_backend: Literal["rq", "thread"] = "rq"
+    mail_backend: Literal["smtp", "file"] = "smtp"
+    mail_directory: Path = Path(".local/mail")
 
     database_url: str = "postgresql+psycopg2://optiq:optiq_dev_password@localhost:5432/optiq"
     redis_url: str = "redis://localhost:6379/0"
-    mlflow_tracking_uri: str = "http://localhost:5000"
+    mlflow_tracking_uri: str = ""
 
     jwt_secret: str = "dev-secret-change-in-production"
     jwt_algorithm: str = "HS256"
@@ -39,6 +47,12 @@ class Settings(BaseSettings):
     smtp_from: str = ""
     smtp_use_tls: bool = True
     resend_api_key: str = ""
+
+    @model_validator(mode="after")
+    def validate_development_backends(self) -> "Settings":
+        if not self.debug and (self.mail_backend == "file" or self.job_backend == "thread"):
+            raise ValueError("MAIL_BACKEND=file and JOB_BACKEND=thread require DEBUG=true; use SMTP and RQ when deployed")
+        return self
 
 
 settings = Settings()

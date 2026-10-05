@@ -6,8 +6,49 @@ on:
   pull_request:
 
 jobs:
-  backend:
+  native:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Bootstrap lightweight contributor setup
+        run: ./scripts/optiq setup
+      - name: Diagnose native setup
+        run: ./scripts/optiq doctor
+      - name: Lint, integration tests, types, frontend build
+        run: ./scripts/optiq check --build
+        env:
+          NEXT_TELEMETRY_DISABLED: "1"
+      - name: Validate Compose configuration
+        run: docker compose --env-file .env -f infra/docker-compose.yml config --quiet
+
+  postgres-migrations:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: optiq
+          POSTGRES_PASSWORD: test_password
+          POSTGRES_DB: optiq
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U optiq -d optiq"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      OPTIQ_ENV_FILE: /dev/null
+      DATABASE_URL: postgresql+psycopg2://optiq:test_password@localhost:5432/optiq
     defaults:
       run:
         working-directory: backend
@@ -16,26 +57,10 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - name: Install backend deps
-        run: python -m pip install --upgrade pip && pip install -r requirements.txt
-      - name: Lint backend
-        run: python -m ruff check .
-      - name: Test backend
-        run: python -m pytest
-
-  frontend:
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: frontend
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-      - name: Install frontend deps
-        run: npm install
-      - name: Lint frontend
-        run: npm run lint
-      - name: Build frontend
-        run: npm run build
+      - run: pip install -r requirements-dev.txt
+      - name: Verify fresh Postgres migrations and reversibility
+        run: |
+          alembic upgrade head
+          alembic downgrade base
+          alembic upgrade head
+          alembic current
