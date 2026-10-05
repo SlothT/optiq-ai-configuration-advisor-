@@ -12,12 +12,12 @@ def test_list_models_returns_enabled_models_only() -> None:
     model_ids = {model.id for model in models}
     assert "gpt-4o" in model_ids
     assert "llama3.2" in model_ids
-    assert "gemini-2.0-flash" in model_ids
-    assert "claude-sonnet-4-20250514" in model_ids
+    assert "gemini-2.5-flash-lite" in model_ids
+    assert "claude-sonnet-4-6" in model_ids
 
 
 def test_get_model_returns_anthropic_when_enabled() -> None:
-    model = get_model("claude-sonnet-4-20250514")
+    model = get_model("claude-sonnet-4-6")
     assert model is not None
     assert model.provider == "anthropic"
 

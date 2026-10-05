@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import smtplib
 from email.message import EmailMessage
+from uuid import uuid4
 
 import httpx
 
@@ -12,6 +13,8 @@ logger = logging.getLogger(__name__)
 
 
 def mail_configured() -> bool:
+    if settings.mail_backend == "file":
+        return settings.debug
     if settings.resend_api_key:
         return True
     return bool(settings.smtp_host and settings.smtp_from)
@@ -80,6 +83,24 @@ def send_verification_email(to_email: str, verify_url: str) -> bool:
 
     text, html = _message_bodies(verify_url)
     from_addr = settings.smtp_from or "Optiq <noreply@optiq.local>"
+
+    if settings.mail_backend == "file":
+        try:
+            settings.mail_directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+            path = settings.mail_directory / f"{uuid4().hex}.eml"
+            message = EmailMessage()
+            message["Subject"] = "Confirm your Optiq account"
+            message["From"] = from_addr
+            message["To"] = to_email
+            message.set_content(text, cte="8bit")
+            with path.open("x", encoding="utf-8") as output:
+                path.chmod(0o600)
+                output.write(message.as_string())
+            logger.info("Development verification email saved to %s", path.resolve())
+            return True
+        except OSError:
+            logger.exception("Could not save development verification email")
+            return False
 
     if settings.resend_api_key:
         try:

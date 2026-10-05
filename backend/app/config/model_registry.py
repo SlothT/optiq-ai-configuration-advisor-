@@ -26,6 +26,11 @@ class ModelInfo:
     default_temperature: float
     max_tokens: int
     enabled: bool
+    advice_tier: str = "unknown"
+    supported_tasks: tuple[str, ...] = ()
+    context_window: int = 8192
+    pricing_source: str | None = None
+    pricing_checked_at: str | None = None
 
 
 def _parse_pricing(raw: dict[str, Any] | None) -> ModelPricing | None:
@@ -74,6 +79,11 @@ def list_models(*, provider: str | None = None, include_disabled: bool = False) 
                     default_temperature=float(model_cfg.get("default_temperature", 0.7)),
                     max_tokens=int(model_cfg.get("max_tokens", 4096)),
                     enabled=model_enabled,
+                    advice_tier=model_cfg.get("advice_tier", "unknown"),
+                    supported_tasks=tuple(model_cfg.get("supported_tasks", [])),
+                    context_window=int(model_cfg.get("context_window", 8192)),
+                    pricing_source=provider_cfg.get("pricing_source"),
+                    pricing_checked_at=provider_cfg.get("pricing_checked_at"),
                 )
             )
 
@@ -106,6 +116,11 @@ def resolve_model_info(model_id: str) -> ModelInfo | None:
         default_temperature=found.default_temperature,
         max_tokens=found.max_tokens,
         enabled=found.enabled,
+        advice_tier=found.advice_tier,
+        supported_tasks=found.supported_tasks,
+        context_window=found.context_window,
+        pricing_source=found.pricing_source,
+        pricing_checked_at=found.pricing_checked_at,
     )
 
 
@@ -129,7 +144,7 @@ def model_is_local(model_id: str) -> bool:
     model = resolve_model_info(model_id)
     if model is None:
         return False
-    return model.pricing is None
+    return model.provider == "ollama"
 
 
 def get_provider_config(provider_name: str) -> dict[str, Any] | None:

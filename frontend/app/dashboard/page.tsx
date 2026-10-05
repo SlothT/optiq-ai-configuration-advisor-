@@ -6,7 +6,7 @@ import Link from "next/link";
 import { apiFetch, getAuthToken } from "@/lib/api";
 import type { ExperimentSummary, Project } from "@/lib/types";
 
-const MLFLOW_UI = process.env.NEXT_PUBLIC_MLFLOW_URL ?? "http://localhost:5000";
+const MLFLOW_UI = process.env.NEXT_PUBLIC_MLFLOW_URL ?? "";
 
 function metric(experiment: ExperimentSummary, key: string) {
     const value = experiment.results?.summary?.[key];
@@ -67,7 +67,7 @@ export default function DashboardPage() {
     return (
         <section className="rounded-[2rem] border border-black/5 bg-white/85 p-8 shadow-panel">
             <h2 className="text-3xl font-semibold">Dashboard</h2>
-            <p className="mt-3 text-sm text-ink/70">Browse experiment history, compare metrics, and open the native MLflow UI.</p>
+            <p className="mt-3 text-sm text-ink/70">Browse comparison history, observed costs, and reference checks. MLflow tracking is optional.</p>
 
             <div className="mt-6 grid gap-4 md:grid-cols-3">
                 <select
@@ -116,7 +116,7 @@ export default function DashboardPage() {
                                 <td className="px-3 py-2 capitalize">{experiment.status}</td>
                                 <td className="px-3 py-2">{metric(experiment, "quality_score") || "—"}</td>
                                 <td className="px-3 py-2">
-                                    {experiment.mlflow_run_id ? (
+                                    {experiment.mlflow_run_id && MLFLOW_UI ? (
                                         <a className="text-accent" href={`${MLFLOW_UI}/#/experiments`} target="_blank" rel="noreferrer">Open</a>
                                     ) : "—"}
                                 </td>

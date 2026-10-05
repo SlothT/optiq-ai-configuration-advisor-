@@ -6,8 +6,6 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-import mlflow
-
 from app.core.config import settings
 from app.models.domain import Experiment
 
@@ -26,7 +24,11 @@ def log_experiment_to_mlflow(
     prompts: list[Any],
     project_name: str | None = None,
 ) -> str | None:
+    if not settings.mlflow_tracking_uri:
+        return None
     try:
+        import mlflow
+
         mlflow.set_tracking_uri(settings.mlflow_tracking_uri)
         mlflow.set_experiment("Optiq")
         with mlflow.start_run(run_name=f"experiment-{experiment.id}") as run:

@@ -7,15 +7,15 @@ import { AppProviders } from "./providers";
 
 export const metadata: Metadata = {
     title: "Optiq",
-    description: "AI Configuration Advisor",
+    description: "Choose an affordable LLM for your prompt",
 };
 
 const navItems = [
     { href: "/", label: "Overview" },
-    { href: "/prompt-analyzer", label: "Prompt Analyzer" },
+    { href: "/prompt-analyzer", label: "Model Advisor" },
     { href: "/experiment-runner", label: "Experiment Runner" },
     { href: "/recommendations", label: "Recommendations" },
-    { href: "/dashboard", label: "MLflow" },
+    { href: "/dashboard", label: "History" },
     { href: "/settings", label: "Settings" },
 ];
 

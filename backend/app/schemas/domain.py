@@ -131,6 +131,7 @@ class ExperimentEstimateRequest(BaseModel):
     prompt_ids: list[str]
     model_ids: list[str]
     test_inputs: list[ExperimentTestInput] = Field(default_factory=list)
+    max_output_tokens: int = Field(default=1024, ge=1, le=4096)
 
 
 class ExperimentRunRequest(BaseModel):
@@ -139,8 +140,10 @@ class ExperimentRunRequest(BaseModel):
     model_ids: list[str]
     task_type: str
     test_inputs: list[ExperimentTestInput] = Field(default_factory=list)
+    max_output_tokens: int = Field(default=1024, ge=1, le=4096)
     confirm_cost: bool = False
-    temperature: float | None = None
+    budget_usd: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+    temperature: float | None = Field(default=None, ge=0, le=1, allow_inf_nan=False)
     label: str | None = None
 
 
@@ -177,9 +180,9 @@ class RecommendationRequest(BaseModel):
     project_id: str
     experiment_id: str | None = None
     goal: Literal["cheapest", "fastest", "highest_quality", "custom"] = "custom"
-    max_cost: float | None = None
-    max_latency_ms: float | None = None
-    min_quality_score: float | None = None
+    max_cost: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+    max_latency_ms: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+    min_quality_score: float | None = Field(default=None, ge=0, le=100, allow_inf_nan=False)
     requires_structured_json: bool = False
     weights: dict[str, float] = Field(default_factory=dict)
 
@@ -192,3 +195,8 @@ class RecommendationResponse(BaseModel):
     ranked_options: list[dict[str, Any]]
     excluded_options: list[dict[str, Any]]
     justification: str
+
+
+class ExperimentFeedbackRequest(BaseModel):
+    row_index: int = Field(ge=0)
+    accepted: bool

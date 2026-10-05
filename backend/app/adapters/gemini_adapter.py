@@ -28,13 +28,16 @@ class GeminiAdapter(BaseAdapter):
             contents = [{"role": "user", "parts": [{"text": prompt}]}]
             payload_in: dict[str, Any] = {
                 "contents": contents,
-                "generationConfig": {"temperature": temperature, "maxOutputTokens": max_tokens},
+                "generationConfig": {
+                    "temperature": temperature, "maxOutputTokens": max_tokens,
+                    **({"thinkingConfig": {"thinkingBudget": 0}} if model_id == "gemini-2.5-flash-lite" else {}),
+                },
             }
             if system:
                 payload_in["systemInstruction"] = {"parts": [{"text": system}]}
             response = self._client.post(
                 f"https://generativelanguage.googleapis.com/v1beta/models/{model_id}:generateContent",
-                params={"key": self.api_key},
+                headers={"x-goog-api-key": self.api_key},
                 json=payload_in,
             )
             response.raise_for_status()
@@ -47,7 +50,7 @@ class GeminiAdapter(BaseAdapter):
                 text=text,
                 raw=payload,
                 input_tokens=usage.get("promptTokenCount"),
-                output_tokens=usage.get("candidatesTokenCount"),
+                output_tokens=(usage.get("candidatesTokenCount", 0) + usage.get("thoughtsTokenCount", 0)) if usage else None,
             )
 
         return with_retries(_call)
