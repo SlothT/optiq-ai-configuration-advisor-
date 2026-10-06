@@ -178,12 +178,3 @@ The [repository review](docs/repository-review.md) documents current correctness
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the contributor workflow. CI validates the native setup, application checks, Compose configuration, and Postgres migration upgrades/downgrades.
 
-## Deployment
-
-The repository includes Render and Vercel configuration templates. Deployment requires Postgres, Redis/RQ with a persistent worker, real email delivery, `DEBUG=false`, and deployment-specific secrets and origins.
-
-The development Compose file uses reload servers and local mail delivery. See the [development guide](docs/development.md) before adapting it for deployment.
-
-## License
-
-A license has not yet been specified. The maintainer must select and add a license before distributing the project as licensed open source.
