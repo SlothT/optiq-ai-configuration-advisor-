@@ -92,6 +92,7 @@ def check(build: bool) -> None:
     # Checks never load contributor secrets or need a live database/provider.
     check_env = {
         **os.environ, "OPTIQ_ENV_FILE": "/dev/null", "DATABASE_URL": "sqlite://",
+        "FRONTEND_URL": "http://localhost:3000",
         "DEBUG": "false", "JOB_BACKEND": "rq", "MAIL_BACKEND": "smtp", "MLFLOW_TRACKING_URI": "",
     }
     run([str(PYTHON), "-m", "ruff", "check", "."], BACKEND, check_env)

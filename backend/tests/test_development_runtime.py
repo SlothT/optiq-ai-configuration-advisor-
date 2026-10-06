@@ -20,6 +20,28 @@ from app.mlflow_integration import log_experiment_to_mlflow
 from app.workers import experiments, queue
 
 
+def test_database_configuration_is_required(monkeypatch) -> None:
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    with pytest.raises(ValidationError, match="database_url"):
+        Settings(_env_file=None)
+
+
+def test_cors_only_allows_configured_origins() -> None:
+    from app.main import allowed_origins
+
+    configured = {origin.rstrip("/") for origin in settings.cors_origins}
+    configured.add(settings.frontend_url.rstrip("/"))
+    with TestClient(app) as client:
+        for origin in [settings.frontend_url, "http://127.0.0.1:3001", "https://unconfigured.example"]:
+            if not origin:
+                continue
+            response = client.options("/api/v1/health", headers={
+                "Origin": origin, "Access-Control-Request-Method": "GET",
+            })
+            assert response.status_code == (200 if origin in configured else 400)
+    assert allowed_origins == configured
+
+
 @pytest.mark.parametrize("backend", [{"mail_backend": "file"}, {"job_backend": "thread"}])
 def test_local_backends_require_development_mode(backend: dict) -> None:
     with pytest.raises(ValidationError, match="require DEBUG=true"):
@@ -81,15 +103,32 @@ def native_client(tmp_path: Path, monkeypatch):
         engine.dispose()
 
 
+def test_failed_resend_preserves_existing_verification_link(native_client, monkeypatch) -> None:
+    email = "resend-test@example.com"
+    registration = native_client.post("/api/v1/auth/register", json={"email": email, "password": "letters123"})
+    assert registration.status_code == 201
+    message = next(settings.mail_directory.glob("*.eml")).read_text()
+    token = re.search(r"token=([A-Za-z0-9_-]+)", message).group(1)
+    monkeypatch.setattr("app.api.auth._deliver_verification", lambda *_args: False)
+    response = native_client.post("/api/v1/auth/resend-verification", json={"email": email})
+    assert response.status_code == 503
+    assert native_client.post("/api/v1/auth/verify", json={"token": token}).status_code == 200
+
+
 def test_native_signup_analysis_and_background_experiment(native_client, monkeypatch) -> None:
     client = native_client
     registration = client.post("/api/v1/auth/register", json={"email": "contributor@example.com", "password": "letters123"})
     assert registration.status_code == 201
+    assert "verification email saved in MAIL_DIRECTORY" in registration.json()["message"]
+    assert client.post("/api/v1/auth/login", json={
+        "email": "contributor@example.com", "password": "letters123",
+    }).status_code == 403
     email = next(settings.mail_directory.glob("*.eml"))
     assert email.stat().st_mode & 0o777 == 0o600
     verification_token = re.search(r"token=([A-Za-z0-9_-]+)", email.read_text()).group(1)
     verified = client.post("/api/v1/auth/verify", json={"token": verification_token})
     assert verified.status_code == 200
+    assert client.post("/api/v1/auth/verify", json={"token": verification_token}).status_code == 400
     headers = {"Authorization": f"Bearer {verified.json()['access_token']}"}
     project = client.post("/api/v1/projects", headers=headers, json={"name": "Native smoke test"}).json()
     project_id = project["id"]

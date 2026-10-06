@@ -1,7 +1,9 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
+import { AdvancedSettings } from "@/components/AdvancedSettings";
+import { ANSWER_LENGTHS } from "@/lib/answer-length";
 
 import { apiFetch, getAuthToken } from "@/lib/api";
 import { formatUsdCost } from "@/lib/cost";
@@ -43,6 +45,8 @@ export default function ExperimentRunnerPage() {
     const [handoffNotice, setHandoffNotice] = useState<string | null>(null);
     const [message, setMessage] = useState<string | null>(null);
     const [loading, setLoading] = useState(false);
+    const [projectLoading, setProjectLoading] = useState(false);
+    const activeProject = useRef("");
     const [estimate, setEstimate] = useState<{
         estimated_cost_usd: number;
         estimated_rows: number;
@@ -66,6 +70,7 @@ export default function ExperimentRunnerPage() {
 
     const loadPrompts = useCallback(async (activeToken: string, nextProjectId: string, preferredPromptId?: string) => {
         const data = (await apiFetch(`/api/v1/prompts?project_id=${nextProjectId}`, { token: activeToken })) as SavedPrompt[];
+        if (activeProject.current !== nextProjectId) return;
         setPrompts(data);
         const selected = preferredPromptId && data.some((prompt) => prompt.id === preferredPromptId)
             ? [preferredPromptId]
@@ -81,6 +86,7 @@ export default function ExperimentRunnerPage() {
 
     const loadProviders = useCallback(async (activeToken: string, nextProjectId: string) => {
         const data = (await apiFetch(`/api/v1/projects/${nextProjectId}/providers`, { token: activeToken })) as ProviderView[];
+        if (activeProject.current !== nextProjectId) return;
         setProviders(data);
         const configured = data.filter((provider) => provider.configured).flatMap((provider) => provider.available_models.map((model) => model.id));
         setSelectedModels((current) => {
@@ -96,10 +102,12 @@ export default function ExperimentRunnerPage() {
         const data = (await apiFetch("/api/v1/projects", { token: activeToken })) as Project[];
         setProjects(data);
         const params = new URLSearchParams(window.location.search);
-        const requestedProjectId = params.get("project_id") || data[0]?.id || "";
+        const requestedProjectId = data.some((project) => project.id === params.get("project_id"))
+            ? params.get("project_id")! : data[0]?.id || "";
         const requestedPromptId = params.get("prompt_id") || "";
         const requestedTaskType = params.get("task_type");
         setProjectId(requestedProjectId);
+        activeProject.current = requestedProjectId;
         if (requestedTaskType) {
             setTaskType(requestedTaskType);
         }
@@ -107,15 +115,20 @@ export default function ExperimentRunnerPage() {
             setHandoffNotice("Loaded the prompt from Model Advisor. Configure the suggested provider before testing; no calls run until confirmation.");
         }
         if (requestedProjectId) {
-            await Promise.all([
-                loadPrompts(activeToken, requestedProjectId, requestedPromptId),
-                loadProviders(activeToken, requestedProjectId),
-            ]);
-            if (params.get("model_ids")) {
-                setSelectedModels(params.get("model_ids")!.split(",").filter(Boolean));
+            setProjectLoading(true);
+            try {
+                await Promise.all([
+                    loadPrompts(activeToken, requestedProjectId, requestedPromptId),
+                    loadProviders(activeToken, requestedProjectId),
+                ]);
+                if (params.get("model_ids")) {
+                    setSelectedModels(params.get("model_ids")!.split(",").filter(Boolean));
+                }
+                const requestedTokens = Number(params.get("max_output_tokens"));
+                if (requestedTokens >= 1 && requestedTokens <= 4096) setMaxOutputTokens(requestedTokens);
+            } finally {
+                setProjectLoading(false);
             }
-            const requestedTokens = Number(params.get("max_output_tokens"));
-            if (requestedTokens >= 1 && requestedTokens <= 4096) setMaxOutputTokens(requestedTokens);
         }
     }, [loadPrompts, loadProviders]);
 
@@ -123,7 +136,7 @@ export default function ExperimentRunnerPage() {
         if (!token) {
             return;
         }
-        void loadProjects(token);
+        void loadProjects(token).catch((error) => setMessage(error instanceof Error ? error.message : "Could not load projects and models."));
     }, [token, loadProjects]);
 
     useEffect(() => {
@@ -151,9 +164,10 @@ export default function ExperimentRunnerPage() {
     }, [projectId, selectedPromptIds, selectedModels, testInput, batchCases, maxOutputTokens, temperature]);
 
     function toggleModel(modelId: string) {
+        setMessage(null);
         setSelectedModels((current) => {
             if (modelId === "auto") {
-                return current.includes("auto") && current.length === 1 ? current : ["auto"];
+                return current.includes("auto") ? [] : ["auto"];
             }
             const withoutAuto = current.filter((item) => item !== "auto");
             return withoutAuto.includes(modelId)
@@ -181,7 +195,11 @@ export default function ExperimentRunnerPage() {
             return;
         }
         if (!selectedPromptIds.length || !selectedModels.length) {
-            setMessage("Select at least one prompt and one model (or Auto).");
+            setMessage("Select at least one prompt and one model, or choose all configured models in Advanced settings.");
+            return;
+        }
+        if (!selectedModels.includes("auto") && selectedModels.some((id) => !availableModels.some((model) => model.id === id))) {
+            setMessage("A selected model is not configured for this project. Connect its provider in Settings or select an available model.");
             return;
         }
         setLoading(true);
@@ -219,10 +237,10 @@ export default function ExperimentRunnerPage() {
                 body: JSON.stringify({
                     project_id: projectId,
                     prompt_ids: selectedPromptIds,
-                    model_ids: selectedModels,
+                    model_ids: estimate.resolved_model_ids || selectedModels,
                     task_type: taskType,
                     test_inputs: testInputsPayload(),
-                max_output_tokens: maxOutputTokens,
+                    max_output_tokens: maxOutputTokens,
                     confirm_cost: true,
                     budget_usd: budget === "" ? estimate.estimated_cost_usd : Number(budget),
                     temperature: temperature.trim() === "" ? 0.2 : Number(temperature),
@@ -274,19 +292,34 @@ export default function ExperimentRunnerPage() {
             {handoffNotice ? <p className="mt-3 rounded-2xl bg-sand px-4 py-3 text-sm text-ink/80">{handoffNotice}</p> : null}
 
             <div className="mt-6 grid gap-6 lg:grid-cols-[0.9fr_1.1fr]">
-                <div className="grid gap-4">
+                <fieldset className="grid min-w-0 gap-4" disabled={loading || projectLoading}>
                     <label className="grid gap-2 text-sm font-medium">
                         Project
                         <select
                             className="rounded-2xl border border-black/10 px-4 py-3"
                             value={projectId}
-                            onChange={(event) => {
+                            disabled={projectLoading}
+                            onChange={async (event) => {
                                 const nextProjectId = event.target.value;
+                                activeProject.current = nextProjectId;
                                 setProjectId(nextProjectId);
                                 setHandoffNotice(null);
+                                setProviders([]);
+                                setPrompts([]);
+                                setSelectedModels([]);
+                                setSelectedPromptIds([]);
+                                setExperiment(null);
+                                setEstimate(null);
+                                setMessage(null);
                                 if (token && nextProjectId) {
-                                    void loadPrompts(token, nextProjectId);
-                                    void loadProviders(token, nextProjectId);
+                                    setProjectLoading(true);
+                                    try {
+                                        await Promise.all([loadPrompts(token, nextProjectId), loadProviders(token, nextProjectId)]);
+                                    } catch (error) {
+                                        setMessage(error instanceof Error ? error.message : "Could not load this project's prompts and models.");
+                                    } finally {
+                                        setProjectLoading(false);
+                                    }
                                 }
                             }}
                         >
@@ -325,52 +358,34 @@ export default function ExperimentRunnerPage() {
 
                     <div>
                         <p className="mb-2 text-sm font-medium">Available models</p>
-                        <p className="mb-2 text-sm text-ink/60">Select the models to test. The all-configured option expands the comparison and its cost; it is not intelligent routing.</p>
+                        <p className="mb-2 text-sm text-ink/60">Choose one or more models connected to this project. Review the cost before running the comparison.</p>
                         <div className="grid gap-2">
-                            <label className="flex items-center gap-2 rounded-2xl border border-black/10 px-4 py-3 text-sm">
-                                <input type="checkbox" checked={selectedModels.includes("auto")} onChange={() => toggleModel("auto")} />
-                                All configured models (up to 8)
-                            </label>
-                            <select
-                                multiple
-                                className="min-h-32 rounded-2xl border border-black/10 px-4 py-3 text-sm"
-                                value={selectedModels.filter((item) => item !== "auto")}
-                                onChange={(event) => {
-                                    const values = Array.from(event.target.selectedOptions).map((option) => option.value);
-                                    setSelectedModels(values);
-                                }}
-                            >
+                            {selectedModels.includes("auto") ? <p className="text-sm text-ink/70">Comparing up to 8 configured models. The cost estimate lists the exact models. <button type="button" className="underline" onClick={() => setSelectedModels([])}>Choose individual models</button></p> : null}
+                            {!selectedModels.includes("auto") ? <fieldset className="grid gap-2 rounded-2xl border border-black/10 p-3 text-sm" disabled={projectLoading || loading}>
+                                <legend className="px-1">Models to compare</legend>
                                 {availableModels.map((model) => (
-                                    <option key={model.id} value={model.id}>
+                                    <label key={model.id} className="flex items-center gap-2">
+                                        <input type="checkbox" checked={selectedModels.includes(model.id)} onChange={() => toggleModel(model.id)} />
                                         {model.display_name}
-                                    </option>
+                                    </label>
                                 ))}
-                            </select>
-                            {!availableModels.length ? (
+                            </fieldset> : null}
+                            {projectLoading ? <p role="status" className="text-sm text-ink/60">Loading models for this project…</p> : null}
+                            {!projectLoading && !availableModels.length ? (
                                 <p className="text-sm text-ink/60">No models listed yet. Save a provider in Settings, and for Ollama pull at least one model.</p>
                             ) : null}
-                            {selectedModels.filter((id) => id !== "auto" && !availableModels.some((model) => model.id === id)).map((id) => <p key={id} className="text-sm text-red-700">{id} is selected but not configured. Add its provider in Settings or choose another model.</p>)}
+                            {selectedModels.filter((id) => id !== "auto" && !availableModels.some((model) => model.id === id)).map((id) => <p key={id} className="text-sm text-red-700">{id} is selected but not configured. Connect its provider in Settings or <button type="button" className="underline" onClick={() => toggleModel(id)}>remove this selection</button>.</p>)}
                             {providerMessages.map((item) => <p key={item} className="text-sm text-red-700">{item}</p>)}
                         </div>
                     </div>
 
                     <label className="grid gap-2 text-sm font-medium">
-                        Temperature
-                        <input
-                            className="rounded-2xl border border-black/10 px-4 py-3"
-                            type="number"
-                            min="0"
-                            max="1"
-                            step="0.1"
-                            value={temperature}
-                            onChange={(event) => setTemperature(event.target.value)}
-                        />
-                        <span className="font-normal text-ink/60">Default 0.2 (range 0–1; higher = more random).</span>
-                    </label>
-
-                    <label className="grid gap-2 text-sm font-medium">
-                        Maximum output tokens per call
-                        <input className="rounded-2xl border border-black/10 px-4 py-3" type="number" min="1" max="4096" value={maxOutputTokens} onChange={(event) => setMaxOutputTokens(Number(event.target.value))} />
+                        Answer length
+                        <select className="rounded-2xl border border-black/10 px-4 py-3" value={Object.values(ANSWER_LENGTHS).includes(maxOutputTokens) ? String(maxOutputTokens) : "custom"} onChange={(event) => { if (event.target.value !== "custom") setMaxOutputTokens(Number(event.target.value)); }}>
+                            {Object.entries(ANSWER_LENGTHS).map(([name, limit]) => <option key={name} value={limit}>{name[0].toUpperCase() + name.slice(1)}</option>)}
+                            {!Object.values(ANSWER_LENGTHS).includes(maxOutputTokens) ? <option value="custom">Custom · {maxOutputTokens} tokens</option> : null}
+                        </select>
+                        <span className="font-normal text-ink/60">Limit per answer: {maxOutputTokens} tokens. Exact limits are available in Advanced settings.</span>
                     </label>
                     <label className="grid gap-2 text-sm font-medium">
                         Additional test input (optional)
@@ -386,6 +401,18 @@ export default function ExperimentRunnerPage() {
                             disabled={Boolean(batchCases?.length)}
                         />
                     </label>
+                    <AdvancedSettings active={temperature !== "0.2" || maxOutputTokens !== 1024 || Boolean(batchCases?.length) || selectedModels.includes("auto")}>
+                    <label className="flex items-center gap-2 text-sm">
+                        <input type="checkbox" disabled={projectLoading || loading || !availableModels.length} checked={selectedModels.includes("auto")} onChange={() => toggleModel("auto")} />Compare all configured models (up to 8)
+                    </label>
+                    <p className="text-sm text-ink/60">More models and test cases increase the number of calls. Review the complete estimate before confirming.</p>
+                    <label className="grid gap-2 text-sm font-medium">Response variation (temperature)
+                        <input className="rounded-xl border p-3" type="number" min="0" max="1" step="0.1" value={temperature} onChange={(event) => setTemperature(event.target.value)} />
+                        <span className="font-normal text-ink/60">Default 0.2. Higher values produce more varied answers.</span>
+                    </label>
+                    <label className="grid gap-2 text-sm font-medium">Exact maximum output tokens per answer
+                        <input className="rounded-xl border p-3" type="number" min="1" max="4096" value={maxOutputTokens} onChange={(event) => setMaxOutputTokens(Number(event.target.value))} />
+                    </label>
                     <label className="grid gap-2 text-sm font-medium">
                         Or upload a CSV / JSON batch of test cases
                         <input className="rounded-2xl border border-black/10 px-4 py-3" type="file" accept=".json,.csv" onChange={(event) => event.target.files?.[0] && void onUpload(event.target.files[0])} />
@@ -397,11 +424,13 @@ export default function ExperimentRunnerPage() {
                             </span>
                         ) : null}
                     </label>
-                    <button className="rounded-full bg-ink px-5 py-3 text-sm font-medium text-paper disabled:opacity-60" disabled={loading} onClick={requestEstimate} type="button">
+                    </AdvancedSettings>
+                    {batchCases?.length ? <p className="text-sm text-ink/70">Testing {batchCases.length} uploaded cases. <button className="underline" type="button" onClick={() => setBatchCases(null)}>Clear batch</button></p> : null}
+                    <button className="rounded-full bg-ink px-5 py-3 text-sm font-medium text-paper disabled:opacity-60" disabled={loading || projectLoading} onClick={requestEstimate} type="button">
                         {loading ? "Working..." : "Estimate cost"}
                     </button>
                     {message ? <p className="text-sm text-ink/70">{message}</p> : null}
-                </div>
+                </fieldset>
 
                 <div>
                     {experiment ? (

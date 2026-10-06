@@ -27,8 +27,8 @@ class Settings(BaseSettings):
     mail_backend: Literal["smtp", "file"] = "smtp"
     mail_directory: Path = Path(".local/mail")
 
-    database_url: str = "postgresql+psycopg2://optiq:optiq_dev_password@localhost:5432/optiq"
-    redis_url: str = "redis://localhost:6379/0"
+    database_url: str
+    redis_url: str = ""
     mlflow_tracking_uri: str = ""
 
     jwt_secret: str = "dev-secret-change-in-production"
@@ -36,9 +36,10 @@ class Settings(BaseSettings):
     jwt_expire_minutes: int = 1440
     fernet_key: str = ""
 
-    frontend_url: str = "http://localhost:3000"
+    frontend_url: str = ""
+    cors_origins: list[str] = []
     google_client_id: str = ""
-    ollama_base_url: str = "http://localhost:11434"
+    ollama_base_url: str = ""
 
     smtp_host: str = ""
     smtp_port: int = 587

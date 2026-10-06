@@ -1,4 +1,4 @@
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
+const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL?.replace(/\/+$/, "");
 
 export class ApiError extends Error {
   status: number;
@@ -42,6 +42,9 @@ function parseErrorMessage(text: string, status: number) {
 }
 
 export async function apiFetch(path: string, init?: RequestInit & { token?: string | null }) {
+  if (!API_BASE_URL) {
+    throw new ApiError("Set NEXT_PUBLIC_API_URL in frontend/.env.local and restart the frontend.", 0);
+  }
   const headers = new Headers(init?.headers ?? {});
   const token = init?.token ?? getAuthToken();
   if (token) {

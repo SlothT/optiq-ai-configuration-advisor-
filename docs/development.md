@@ -70,6 +70,8 @@ The tracking profile starts MLflow; `INSTALL_EXTRAS=true` installs its client an
 
 Settings load repo-root `.env` automatically; `OPTIQ_ENV_FILE` selects a specific file for scripts/tests. Process environment values take precedence. Frontend `NEXT_PUBLIC_*` settings are embedded at build time in production.
 
+`DATABASE_URL` must be configured explicitly. Set `FRONTEND_URL` for browser access and email verification links. CORS permits only that origin plus the optional JSON array `CORS_ORIGINS` (for example, `["http://127.0.0.1:3000"]`); there are no implicit localhost allowances. Configure `REDIS_URL` when using RQ and `OLLAMA_BASE_URL` when using the default Ollama endpoint. The frontend requires `NEXT_PUBLIC_API_URL` in `frontend/.env.local` or its deployment environment; it does not fall back to localhost.
+
 Native data, email files, and optional tracking artifacts live under ignored `.local/`. Secrets live in ignored `.env`. Back up `.env` together with the database: replacing `FERNET_KEY` makes stored provider keys unreadable. Never commit or publish local mail files, which contain verification tokens.
 
 If you already have an old Docker-oriented `.env`, setup preserves it. To adopt native defaults, move it to a private backup outside the repo, then rerun setup. Existing Postgres data is not automatically migrated to SQLite.

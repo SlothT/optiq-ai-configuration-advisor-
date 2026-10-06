@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
+import { AdvancedSettings } from "@/components/AdvancedSettings";
 
 import { apiFetch, getAuthToken } from "@/lib/api";
 import type { ExperimentSummary, Project } from "@/lib/types";
@@ -84,7 +85,10 @@ export default function DashboardPage() {
                     <option value="">Select a project</option>
                     {projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}
                 </select>
-                <input className="rounded-2xl border border-black/10 px-4 py-3" placeholder="Filter by label or task type" value={tag} onChange={(event) => setTag(event.target.value)} />
+                <AdvancedSettings title="Advanced filters" active={Boolean(tag)}>
+                <label className="grid gap-2 text-sm font-medium">Label or task type
+                <input className="rounded-2xl border border-black/10 px-4 py-3" placeholder="For example: classification" value={tag} onChange={(event) => setTag(event.target.value)} />
+                </label>
                 <button
                     className="rounded-full bg-ink px-5 py-3 text-sm font-medium text-paper"
                     type="button"
@@ -92,6 +96,7 @@ export default function DashboardPage() {
                 >
                     Apply filter
                 </button>
+                </AdvancedSettings>
             </div>
             {message ? <p className="mt-3 text-sm text-ink/70">{message}</p> : null}
 

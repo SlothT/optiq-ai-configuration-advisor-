@@ -7,9 +7,11 @@ import httpx
 
 from app.adapters.base import BaseAdapter, GenerateResult
 from app.adapters.retries import with_retries
+from app.core.config import settings
 
 
-def normalize_ollama_base_url(url: str | None, fallback: str = "http://localhost:11434") -> str:
+def normalize_ollama_base_url(url: str | None, fallback: str | None = None) -> str:
+    fallback = settings.ollama_base_url if fallback is None else fallback
     raw = (url or fallback).strip()
     parsed = urlparse(raw)
     if not parsed.scheme or not parsed.netloc:

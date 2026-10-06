@@ -48,6 +48,11 @@ def _hash_verify_token(token: str) -> str:
 
 
 def _issue_verification(user: User) -> str:
+    if not settings.frontend_url:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Email verification requires FRONTEND_URL to be configured.",
+        )
     raw_token = secrets.token_urlsafe(32)
     user.email_verified = False
     user.email_verify_token_hash = _hash_verify_token(raw_token)
@@ -92,7 +97,12 @@ def register(request: RegisterRequest, db: Session = Depends(db_session)) -> Reg
         id=user.id,
         email=user.email,
         email_verified=False,
-        message="Check your inbox and click the confirmation link. If this address is not real, you will not get the email and cannot sign in.",
+        message=(
+            "Local development: verification email saved in MAIL_DIRECTORY "
+            "(normally .local/mail). Open the .eml file and follow its confirmation link."
+            if settings.mail_backend == "file"
+            else "Verification email submitted to the mail service. Check your inbox and spam folder for the confirmation link."
+        ),
     )
 
 
@@ -149,8 +159,13 @@ def resend_verification(request: ResendVerificationRequest, db: Session = Depend
         return {"message": "If that email can be verified, we sent a new link."}
 
     verify_url = _issue_verification(user)
+    if not _deliver_verification(email, verify_url):
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Could not submit the verification email. Please try again later.",
+        )
     db.commit()
-    _deliver_verification(email, verify_url)
     return {"message": "If that email can be verified, we sent a new link."}
 
 
