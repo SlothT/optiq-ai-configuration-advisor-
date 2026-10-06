@@ -18,11 +18,8 @@ app = FastAPI(
 )
 
 allowed_origins = {
-    settings.frontend_url,
-    "http://localhost:3000",
-    "http://127.0.0.1:3000",
-    "http://localhost:3001",
-    "http://127.0.0.1:3001",
+    settings.frontend_url.rstrip("/"),
+    *(origin.rstrip("/") for origin in settings.cors_origins),
 }
 
 app.add_middleware(

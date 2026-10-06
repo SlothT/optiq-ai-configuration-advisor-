@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { apiFetch, getAuthToken } from "@/lib/api";
+import { AdvancedSettings } from "@/components/AdvancedSettings";
 import type { Project, ProviderView } from "@/lib/types";
 
 export default function SettingsPage() {
@@ -90,8 +91,8 @@ export default function SettingsPage() {
                 method: "POST",
                 body: JSON.stringify({
                     provider_name: providerName,
-                    api_key: apiKey || null,
-                    ollama_base_url: ollamaBaseUrl || null,
+                    api_key: providerName === "ollama" ? null : apiKey || null,
+                    ollama_base_url: providerName === "ollama" ? ollamaBaseUrl || null : null,
                 }),
                 headers: { "Content-Type": "application/json" },
             });
@@ -109,7 +110,7 @@ export default function SettingsPage() {
         <section className="grid gap-6 lg:grid-cols-[0.95fr_1.05fr]">
             <div className="rounded-[2rem] border border-black/5 bg-white/85 p-8 shadow-panel">
                 <h2 className="text-3xl font-semibold">Settings</h2>
-                <p className="mt-3 text-sm text-ink/70">Create a project and store provider credentials for the current browser session.</p>
+                <p className="mt-3 text-sm text-ink/70">Create a project and connect the providers you want to test. API keys are encrypted and saved for that project.</p>
 
                 <div className="mt-6 grid gap-4">
                     <label className="grid gap-2 text-sm font-medium">
@@ -152,26 +153,30 @@ export default function SettingsPage() {
                     <div className="mt-5 grid gap-4">
                         <label className="grid gap-2 text-sm font-medium">
                             Provider
-                            <select className="rounded-2xl border border-black/10 px-4 py-3" value={providerName} onChange={(event) => setProviderName(event.target.value)}>
+                            <select className="rounded-2xl border border-black/10 px-4 py-3" value={providerName} onChange={(event) => { setProviderName(event.target.value); setApiKey(""); }}>
                                 <option value="openai">OpenAI</option>
                                 <option value="ollama">Ollama</option>
                                 <option value="anthropic">Anthropic</option>
                                 <option value="google">Google</option>
                             </select>
                         </label>
-                        <label className="grid gap-2 text-sm font-medium">
+                        {providerName !== "ollama" ? <label className="grid gap-2 text-sm font-medium">
                             API key
-                            <input className="rounded-2xl border border-black/10 px-4 py-3" value={apiKey} onChange={(event) => setApiKey(event.target.value)} />
-                        </label>
+                            <input type="password" autoComplete="off" className="rounded-2xl border border-black/10 px-4 py-3" value={apiKey} onChange={(event) => setApiKey(event.target.value)} />
+                        </label> : <>
+                        <p className="text-sm text-ink/60">Ollama uses an installed model on your computer or server. No API key is needed.</p>
+                        <AdvancedSettings active={Boolean(ollamaBaseUrl)}>
                         <label className="grid gap-2 text-sm font-medium">
-                            Ollama base URL
+                            Ollama server address
                             <input
                                 className="rounded-2xl border border-black/10 px-4 py-3"
-                                placeholder="http://localhost:11434"
+                                placeholder="Leave empty to use the configured server"
                                 value={ollamaBaseUrl}
                                 onChange={(event) => setOllamaBaseUrl(event.target.value)}
                             />
                         </label>
+                        </AdvancedSettings>
+                        </>}
                         <button className="rounded-full bg-accent px-5 py-3 text-sm font-medium text-white disabled:opacity-60" disabled={!selectedProjectId} onClick={saveProvider} type="button">
                             Save provider
                         </button>

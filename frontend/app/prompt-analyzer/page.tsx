@@ -3,6 +3,8 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
+import { AdvancedSettings } from "@/components/AdvancedSettings";
+import { answerTokenLimit, type AnswerLength } from "@/lib/answer-length";
 
 import { apiFetch, getAuthToken } from "@/lib/api";
 import { formatUsdCost } from "@/lib/cost";
@@ -10,9 +12,10 @@ import type { ModelAdvice, AdviceOption, Project, PromptAnalysis } from "@/lib/t
 
 export default function ModelAdvisorPage() {
     const router = useRouter();
-    const [prompt, setPrompt] = useState("Write an 800-word introductory essay about remote work for a general audience.");
+    const [prompt, setPrompt] = useState("");
     const [preference, setPreference] = useState("cost");
-    const [outputTokens, setOutputTokens] = useState(1200);
+    const [answerLength, setAnswerLength] = useState<AnswerLength>("automatic");
+    const outputTokens = answerTokenLimit(prompt, answerLength);
     const [baseline, setBaseline] = useState("");
     const [provider, setProvider] = useState("");
     const [localOnly, setLocalOnly] = useState(false);
@@ -105,36 +108,41 @@ export default function ModelAdvisorPage() {
                 <p className="mt-2 text-sm text-ink/70">Find an affordable starting model for your prompt. Advice runs locally with no paid model calls, API keys, or dataset.</p>
                 <div className="mt-6 grid gap-4">
                     <label className="grid gap-2 text-sm font-medium">Your prompt
-                        <textarea className="min-h-48 rounded-2xl border border-black/10 p-4" value={prompt} onChange={(event) => setPrompt(event.target.value)} />
+                        <textarea className="min-h-48 rounded-2xl border border-black/10 p-4" placeholder="Describe what you need. For example: Draft a short email thanking a customer for their feedback." value={prompt} onChange={(event) => setPrompt(event.target.value)} />
                     </label>
-                    <label className="grid gap-2 text-sm font-medium">Preference
+                    <label className="grid gap-2 text-sm font-medium">What matters most?
                         <select className="rounded-2xl border border-black/10 p-3" value={preference} onChange={(event) => setPreference(event.target.value)}>
-                            <option value="cost">Lower cost</option><option value="quality">More demanding quality</option>
+                            <option value="cost">Lower cost</option><option value="quality">More demanding task</option>
                         </select>
                     </label>
-                    <label className="grid gap-2 text-sm font-medium">Expected output tokens
-                        <input className="rounded-2xl border border-black/10 p-3" type="number" min="1" max="4096" value={outputTokens} onChange={(event) => setOutputTokens(Number(event.target.value))} />
-                        <span className="font-normal text-ink/60">An estimate and optional test limit. Words and tokens are different.</span>
+                    <label className="grid gap-2 text-sm font-medium">Answer length
+                        <select className="rounded-2xl border border-black/10 p-3" value={answerLength} onChange={(event) => setAnswerLength(event.target.value as AnswerLength)}>
+                            <option value="automatic">Automatic</option><option value="short">Short</option><option value="medium">Medium</option><option value="long">Long</option>
+                        </select>
+                        <span className="font-normal text-ink/60">Automatic uses your requested word count or length, otherwise a medium answer. This estimates cost and sets the optional test limit.</span>
                     </label>
+                    <AdvancedSettings active={Boolean(provider || localOnly || maxCost)}>
+                        <p className="text-sm text-ink/60">Optional requirements. Defaults consider all supported providers.</p>
+                        <label className="grid gap-2 text-sm font-medium">Provider
+                            <select className="rounded-xl border p-2" value={provider} onChange={(event) => { setProvider(event.target.value); if (event.target.value !== "ollama") setLocalOnly(false); }}>
+                                <option value="">Any supported provider</option>{["openai", "anthropic", "google", "ollama"].map((name) => <option key={name}>{name}</option>)}
+                            </select>
+                        </label>
+                        <label className="grid gap-2 text-sm">
+                            <span className="flex gap-2"><input type="checkbox" checked={localOnly} onChange={(event) => { setLocalOnly(event.target.checked); if (event.target.checked) setProvider("ollama"); }} />Run locally with Ollama only</span>
+                            <span className="text-ink/60">Requires an Ollama server and installed model. No API charge; your computer still supplies the resources.</span>
+                        </label>
+                        <label className="grid gap-2 text-sm">Maximum API cost per request (USD, optional)
+                            <input className="rounded-xl border p-2" type="number" min="0" step="0.0001" value={maxCost} onChange={(event) => setMaxCost(event.target.value)} />
+                        </label>
+                    </AdvancedSettings>
+                    <AdvancedSettings title="Compare with your current model (optional)" active={Boolean(baseline)}>
                     <label className="grid gap-2 text-sm font-medium">Compare cost with (optional)
                         <select className="rounded-2xl border border-black/10 p-3" value={baseline} onChange={(event) => setBaseline(event.target.value)}>
                             <option value="">No baseline</option>{models.map((model) => <option key={model.id} value={model.id}>{model.display_name}</option>)}
                         </select>
                     </label>
-                    <details className="rounded-2xl border border-black/10 p-4">
-                        <summary className="cursor-pointer text-sm font-medium">Provider and cost requirements</summary>
-                        <div className="mt-3 grid gap-3 text-sm">
-                            <label className="grid gap-2">Provider
-                                <select className="rounded-xl border p-2" value={provider} onChange={(event) => setProvider(event.target.value)}>
-                                    <option value="">Any supported provider</option>{["openai", "anthropic", "google", "ollama"].map((name) => <option key={name}>{name}</option>)}
-                                </select>
-                            </label>
-                            <label className="flex gap-2"><input type="checkbox" checked={localOnly} onChange={(event) => setLocalOnly(event.target.checked)} />Local inference only</label>
-                            <label className="grid gap-2">Maximum API cost per request (USD, optional)
-                                <input className="rounded-xl border p-2" type="number" min="0" step="0.0001" value={maxCost} onChange={(event) => setMaxCost(event.target.value)} />
-                            </label>
-                        </div>
-                    </details>
+                    </AdvancedSettings>
                     <button className="rounded-full bg-ink px-5 py-3 text-sm font-medium text-paper disabled:opacity-60" disabled={loading || !prompt.trim()} onClick={getAdvice} type="button">{loading ? "Working..." : "Suggest a model"}</button>
                     {message ? <p role="status" className="text-sm text-ink/70">{message}</p> : null}
                 </div>
@@ -149,7 +157,7 @@ export default function ModelAdvisorPage() {
                         <p className="mt-2 text-sm text-ink/70">{option.reason}</p>
                         <p className="mt-1 text-sm text-ink/60">{option.limitation}</p>
                         {option.pricing_source ? <a className="mt-2 block text-xs underline" href={option.pricing_source} target="_blank" rel="noreferrer">Pricing source · checked {option.pricing_checked_at}</a> : null}
-                        <p className="mt-2 text-xs text-ink/60">Temperature {option.temperature} · output limit {option.max_output_tokens}</p>
+                        <details className="mt-2 text-xs text-ink/60"><summary className="cursor-pointer">Technical settings</summary><p className="mt-2">Temperature {option.temperature} · output limit {option.max_output_tokens} tokens</p></details>
                         <button className="mt-3 rounded-full border border-black/15 px-4 py-2 text-sm" type="button" onClick={() => void copyConfig(option)}>Copy prompt and settings</button>
                     </div>)}
                     {result.baseline ? <div className="rounded-2xl border border-black/10 p-4 text-sm">
@@ -157,7 +165,8 @@ export default function ModelAdvisorPage() {
                         {result.baseline.estimated_savings_usd !== null ? <p className="mt-1">Estimated difference: {formatUsdCost(result.baseline.estimated_savings_usd)} / request</p> : null}
                         <p className="mt-2 text-ink/60">{result.baseline.note}</p>
                     </div> : null}
-                    <ul className="list-disc space-y-2 pl-5 text-sm text-ink/60">{[...result.assumptions, ...result.limitations].map((item) => <li key={item}>{item}</li>)}</ul>
+                    <p className="text-sm text-ink/60">Not tested on your prompt. Review an answer before relying on this suggestion.</p>
+                    <details className="text-sm text-ink/60"><summary className="cursor-pointer">How we chose this and cost assumptions</summary><ul className="mt-3 list-disc space-y-2 pl-5">{[...result.assumptions, ...result.limitations].map((item) => <li key={item}>{item}</li>)}</ul></details>
                     {result.recommended ? <div className="mt-2 grid gap-3 border-t pt-4">
                         <h4 className="font-semibold">Optional comparison</h4>
                         <p className="text-sm text-ink/60">Testing can cost more than it saves for a one-off task. Sign in and configure providers to compare outputs; review the estimate before execution.</p>

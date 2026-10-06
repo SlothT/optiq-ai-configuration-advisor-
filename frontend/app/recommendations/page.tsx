@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 
 import { apiFetch, getAuthToken } from "@/lib/api";
+import { AdvancedSettings } from "@/components/AdvancedSettings";
 import { formatUsdCost } from "@/lib/cost";
 import type { ExperimentSummary, Project, RecommendationResult } from "@/lib/types";
 
@@ -114,17 +115,20 @@ export default function RecommendationsPage() {
                         </select>
                     </label>
                     <label className="grid gap-2 text-sm font-medium">
-                        Recommendation basis
+                        What matters most?
                         <select className="rounded-2xl border border-black/10 px-4 py-3" value={goal} onChange={(event) => setGoal(event.target.value)}>
                             <option value="highest_quality">Highest reference-check score</option>
                             <option value="cheapest">Cheapest</option>
                             <option value="fastest">Fastest</option>
                         </select>
                     </label>
+                    <AdvancedSettings active={Boolean(maxCost || maxLatency || minQuality || requiresJson)}>
+                    <p className="text-sm text-ink/60">Optional requirements exclude results that do not meet them.</p>
                     <label className="grid gap-2 text-sm">Maximum cost per case (USD, optional)<input className="rounded-xl border p-3" type="number" min="0" step="0.000001" value={maxCost} onChange={(event) => setMaxCost(event.target.value)} /></label>
                     <label className="grid gap-2 text-sm">Maximum observed mean latency (ms, optional)<input className="rounded-xl border p-3" type="number" min="0" value={maxLatency} onChange={(event) => setMaxLatency(event.target.value)} /></label>
                     <label className="grid gap-2 text-sm">Minimum reference-check score (0–100, optional)<input className="rounded-xl border p-3" type="number" min="0" max="100" value={minQuality} onChange={(event) => setMinQuality(event.target.value)} /></label>
                     <label className="flex gap-2 text-sm"><input type="checkbox" checked={requiresJson} onChange={(event) => setRequiresJson(event.target.checked)} />Require valid JSON objects for every case</label>
+                    </AdvancedSettings>
                     <p className="text-sm text-ink/60">Unscored subjective outputs require your review. Ranking does not establish general quality.</p>
                     <button className="rounded-full bg-ink px-5 py-3 text-sm font-medium text-paper disabled:opacity-60" disabled={loading} onClick={recommend} type="button">
                         {loading ? "Scoring..." : "Recommend model"}
