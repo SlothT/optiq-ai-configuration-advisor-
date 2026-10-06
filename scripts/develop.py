@@ -93,7 +93,7 @@ def check(build: bool) -> None:
     check_env = {
         **os.environ, "OPTIQ_ENV_FILE": "/dev/null", "DATABASE_URL": "sqlite://",
         "FRONTEND_URL": "http://localhost:3000",
-        "DEBUG": "false", "JOB_BACKEND": "rq", "MAIL_BACKEND": "smtp", "MLFLOW_TRACKING_URI": "",
+        "APP_ENV": "test", "DEBUG": "false", "JOB_BACKEND": "rq", "MAIL_BACKEND": "smtp", "MLFLOW_TRACKING_URI": "",
     }
     run([str(PYTHON), "-m", "ruff", "check", "."], BACKEND, check_env)
     run([str(PYTHON), "-m", "ruff", "check", str(ROOT / "scripts/develop.py")], BACKEND, check_env)

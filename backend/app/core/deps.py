@@ -31,6 +31,8 @@ async def get_current_user(
     user = db.query(User).filter(User.id == payload["sub"]).one_or_none()
     if not user:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
+    if not user.email_verified:
+        raise HTTPException(status_code=403, detail="Verify your email before accessing this resource.")
     return user
 
 

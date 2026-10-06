@@ -6,11 +6,13 @@ import secrets
 from datetime import UTC, datetime, timedelta
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
+from sqlalchemy import update
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.core.deps import db_session, get_current_user
+from app.core.rate_limit import check_rate_limit
 from app.core.security import create_access_token, hash_password, verify_password
 from app.models.domain import User
 from app.schemas.domain import (
@@ -65,7 +67,8 @@ def _deliver_verification(email: str, verify_url: str) -> bool:
 
 
 @router.post("/register", response_model=RegisterResponse, status_code=status.HTTP_201_CREATED)
-def register(request: RegisterRequest, db: Session = Depends(db_session)) -> RegisterResponse:
+def register(request: RegisterRequest, http_request: Request, db: Session = Depends(db_session)) -> RegisterResponse:
+    check_rate_limit(http_request, str(request.email), limit=3, window=900)
     email = str(request.email).strip().lower()
     _validate_password(request.password)
 
@@ -107,13 +110,14 @@ def register(request: RegisterRequest, db: Session = Depends(db_session)) -> Reg
 
 
 @router.post("/login", response_model=TokenResponse)
-def login(request: LoginRequest, db: Session = Depends(db_session)) -> TokenResponse:
+def login(request: LoginRequest, http_request: Request, db: Session = Depends(db_session)) -> TokenResponse:
+    check_rate_limit(http_request, str(request.email))
     email = str(request.email).strip().lower()
     user = db.query(User).filter(User.email == email).one_or_none()
     if not user:
         raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="No account found for this email. Sign up to get started.",
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Email or password is incorrect.",
         )
     if user.auth_provider == "google":
         raise HTTPException(
@@ -121,7 +125,7 @@ def login(request: LoginRequest, db: Session = Depends(db_session)) -> TokenResp
             detail="This account uses Google sign-in. Use Continue with Google.",
         )
     if not verify_password(request.password, user.password_hash):
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Incorrect password.")
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Email or password is incorrect.")
     if not user.email_verified:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -132,7 +136,8 @@ def login(request: LoginRequest, db: Session = Depends(db_session)) -> TokenResp
 
 
 @router.post("/verify", response_model=TokenResponse)
-def verify_email(request: VerifyEmailRequest, db: Session = Depends(db_session)) -> TokenResponse:
+def verify_email(request: VerifyEmailRequest, http_request: Request, db: Session = Depends(db_session)) -> TokenResponse:
+    check_rate_limit(http_request, limit=30)
     token_hash = _hash_verify_token(request.token.strip())
     user = db.query(User).filter(User.email_verify_token_hash == token_hash).one_or_none()
     if not user:
@@ -143,18 +148,25 @@ def verify_email(request: VerifyEmailRequest, db: Session = Depends(db_session))
     if not expires or expires < datetime.now(UTC):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="This verification link has expired. Request a new one.")
 
-    user.email_verified = True
-    user.email_verify_token_hash = None
-    user.email_verify_expires_at = None
+    consumed = db.execute(update(User).where(
+        User.id == user.id,
+        User.email_verify_token_hash == token_hash,
+        User.email_verified.is_(False),
+        User.email_verify_expires_at >= datetime.now(UTC),
+    ).values(email_verified=True, email_verify_token_hash=None, email_verify_expires_at=None).execution_options(synchronize_session=False))
+    if consumed.rowcount != 1:
+        db.rollback()
+        raise HTTPException(status_code=400, detail="This verification link is invalid or has already been used.")
     db.commit()
     db.refresh(user)
     return _token_for_user(user)
 
 
 @router.post("/resend-verification")
-def resend_verification(request: ResendVerificationRequest, db: Session = Depends(db_session)) -> dict:
+def resend_verification(request: ResendVerificationRequest, http_request: Request, db: Session = Depends(db_session)) -> dict:
+    check_rate_limit(http_request, str(request.email), limit=3, window=600)
     email = str(request.email).strip().lower()
-    user = db.query(User).filter(User.email == email).one_or_none()
+    user = db.query(User).filter(User.email == email).with_for_update().one_or_none()
     if not user or user.email_verified or user.auth_provider != "password":
         return {"message": "If that email can be verified, we sent a new link."}
 
@@ -170,7 +182,8 @@ def resend_verification(request: ResendVerificationRequest, db: Session = Depend
 
 
 @router.post("/google", response_model=TokenResponse)
-def login_with_google(request: GoogleAuthRequest, db: Session = Depends(db_session)) -> TokenResponse:
+def login_with_google(request: GoogleAuthRequest, http_request: Request, db: Session = Depends(db_session)) -> TokenResponse:
+    check_rate_limit(http_request, limit=30)
     if not settings.google_client_id:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -209,7 +222,12 @@ def login_with_google(request: GoogleAuthRequest, db: Session = Depends(db_sessi
         db.commit()
         db.refresh(user)
     elif not user.email_verified:
+        # A verified Google identity must not activate a pre-existing, unverified password.
+        user.password_hash = hash_password(secrets.token_urlsafe(32))
+        user.auth_provider = "google"
         user.email_verified = True
+        user.email_verify_token_hash = None
+        user.email_verify_expires_at = None
         db.commit()
 
     return _token_for_user(user)

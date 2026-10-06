@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import smtplib
 from email.message import EmailMessage
+from email.utils import parseaddr
 from uuid import uuid4
 
 import httpx
@@ -15,8 +16,8 @@ logger = logging.getLogger(__name__)
 def mail_configured() -> bool:
     if settings.mail_backend == "file":
         return settings.debug
-    if settings.resend_api_key:
-        return True
+    if settings.resend_api_key or settings.brevo_api_key:
+        return bool(settings.smtp_from)
     return bool(settings.smtp_host and settings.smtp_from)
 
 
@@ -47,6 +48,24 @@ def _send_via_resend(to_email: str, from_addr: str, text: str, html: str) -> boo
             "subject": "Confirm your Optiq account",
             "text": text,
             "html": html,
+        },
+        timeout=20.0,
+    )
+    response.raise_for_status()
+    return True
+
+
+def _send_via_brevo(to_email: str, from_addr: str, text: str, html: str) -> bool:
+    name, address = parseaddr(from_addr)
+    response = httpx.post(
+        "https://api.brevo.com/v3/smtp/email",
+        headers={"api-key": settings.brevo_api_key, "Content-Type": "application/json"},
+        json={
+            "sender": {"name": name or "Optiq", "email": address},
+            "to": [{"email": to_email}],
+            "subject": "Confirm your Optiq account",
+            "textContent": text,
+            "htmlContent": html,
         },
         timeout=20.0,
     )
@@ -100,6 +119,13 @@ def send_verification_email(to_email: str, verify_url: str) -> bool:
             return True
         except OSError:
             logger.exception("Could not save development verification email")
+            return False
+
+    if settings.brevo_api_key:
+        try:
+            return _send_via_brevo(to_email, from_addr, text, html)
+        except Exception:
+            logger.exception("Brevo failed to submit verification email")
             return False
 
     if settings.resend_api_key:

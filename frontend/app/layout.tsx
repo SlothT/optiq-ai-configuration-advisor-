@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import { BrandMark } from "@/components/BrandMark";
 import { HeaderAuth } from "@/components/HeaderAuth";
+import { ProductFeedback } from "@/components/ProductFeedback";
 import "./globals.css";
 import { AppProviders } from "./providers";
 
@@ -47,6 +48,7 @@ export default function RootLayout({ children }: Readonly<{ children: any }>) {
                             </div>
                         </header>
                         <main className="flex-1">{children}</main>
+                        <ProductFeedback />
                     </div>
                 </AppProviders>
             </body>

@@ -87,6 +87,10 @@ def native_client(tmp_path: Path, monkeypatch):
         with sessions() as db:
             yield db
 
+    from app.core.rate_limit import _local
+
+    _local.clear()
+    monkeypatch.setattr(settings, "app_env", "test")
     monkeypatch.setattr(settings, "debug", True)
     monkeypatch.setattr(settings, "job_backend", "thread")
     monkeypatch.setattr(settings, "mail_backend", "file")
@@ -228,3 +232,161 @@ def test_token_estimates_work_without_downloaded_tokenizer_data(monkeypatch) -> 
     monkeypatch.setattr(phase1.tiktoken, "get_encoding", unavailable)
     assert phase1.estimate_tokens("Hello world") == 3
     assert phase1.estimate_tokens("") == 0
+
+
+def test_login_rate_limit_and_generic_error(native_client) -> None:
+    payload = {"email": "missing@example.com", "password": "letters123"}
+    for _ in range(10):
+        response = native_client.post("/api/v1/auth/login", json=payload)
+        assert response.status_code == 401
+        assert response.json()["detail"] == "Email or password is incorrect."
+    response = native_client.post("/api/v1/auth/login", json=payload)
+    assert response.status_code == 429
+    assert int(response.headers["Retry-After"]) > 0
+
+
+def test_feedback_validation_persistence_and_limit(native_client) -> None:
+    from app.models.domain import ProductFeedback
+
+    payload = {"page": "/advisor", "rating": "helpful", "comment": " Easier to compare "}
+    assert native_client.post("/api/v1/feedback", json={**payload, "page": "/auth/verify?token=secret"}).status_code == 422
+    assert native_client.post("/api/v1/feedback", json={**payload, "comment": "x" * 1001}).status_code == 422
+    for _ in range(10):
+        assert native_client.post("/api/v1/feedback", json=payload).status_code == 201
+    assert native_client.post("/api/v1/feedback", json=payload).status_code == 429
+    override = app.dependency_overrides[db_session]()
+    db = next(override)
+    assert db.query(ProductFeedback).count() == 10
+    assert db.query(ProductFeedback).first().comment == "Easier to compare"
+    override.close()
+    assert native_client.get("/api/v1/feedback").status_code == 405
+
+
+def test_brevo_uses_https_and_verified_sender(monkeypatch) -> None:
+    from app.services import email
+
+    monkeypatch.setattr(settings, "mail_backend", "smtp")
+    monkeypatch.setattr(settings, "brevo_api_key", "test-key")
+    monkeypatch.setattr(settings, "smtp_from", "Optiq <owner@example.com>")
+    requests = []
+
+    def post(url, **kwargs):
+        requests.append((url, kwargs))
+        return __import__("httpx").Response(201, request=__import__("httpx").Request("POST", url))
+
+    monkeypatch.setattr(email.httpx, "post", post)
+    assert email.send_verification_email("user@example.com", "https://app.example/auth/verify?token=test")
+    url, args = requests[0]
+    assert url == "https://api.brevo.com/v3/smtp/email"
+    assert args["json"]["sender"] == {"name": "Optiq", "email": "owner@example.com"}
+    assert args["json"]["to"] == [{"email": "user@example.com"}]
+
+
+def test_production_configuration_requires_secure_settings() -> None:
+    valid = dict(app_env="production", debug=False, job_backend="rq", mail_backend="smtp",
+                 database_url="postgresql://test:test@db.example/optiq?sslmode=require",
+                 redis_url="redis://queue:6379", jwt_secret="a" * 40,
+                 fernet_key=Fernet.generate_key().decode(), frontend_url="https://app.example",
+                 smtp_from="Optiq <owner@example.com>", brevo_api_key="test-key", cors_origins=[])
+    assert Settings(_env_file=None, **valid).database_url.startswith("postgresql+psycopg2://")
+    for invalid in [{"debug": True}, {"database_url": "sqlite:///test.db"}, {"jwt_secret": "short"},
+                    {"fernet_key": "bad"}, {"frontend_url": "http://localhost:3000"},
+                    {"smtp_from": "Optiq <noreply@optiq.local>"}, {"redis_url": ""}]:
+        with pytest.raises(ValidationError):
+            Settings(_env_file=None, **{**valid, **invalid})
+
+
+def test_shared_rate_limit_fails_closed(monkeypatch) -> None:
+    from fastapi import HTTPException
+    from redis.exceptions import ConnectionError
+
+    from app.core import rate_limit
+
+    monkeypatch.setattr(settings, "app_env", "production")
+
+    def unavailable(*args, **kwargs):
+        raise ConnectionError("unavailable")
+
+    monkeypatch.setattr(rate_limit.Redis, "from_url", unavailable)
+    with pytest.raises(HTTPException) as error:
+        rate_limit._increment("test", 60)
+    assert error.value.status_code == 503
+
+
+def test_google_cannot_activate_an_unverified_password(native_client, monkeypatch) -> None:
+    import httpx
+
+    from app.api import auth
+
+    email = "google-owner@example.com"
+    assert native_client.post("/api/v1/auth/register", json={"email": email, "password": "attacker123"}).status_code == 201
+    old_token = re.search(r"token=([\w-]+)", next(settings.mail_directory.glob("*.eml")).read_text()).group(1)
+    monkeypatch.setattr(settings, "google_client_id", "test-client")
+    monkeypatch.setattr(auth.httpx, "get", lambda *args, **kwargs: httpx.Response(
+        200, json={"aud": "test-client", "email_verified": "true", "email": email},
+        request=httpx.Request("GET", "https://oauth2.googleapis.com/tokeninfo"),
+    ))
+    response = native_client.post("/api/v1/auth/google", json={"id_token": "fixture"})
+    assert response.status_code == 200
+    assert native_client.get("/api/v1/auth/me", headers={"Authorization": "Bearer " + response.json()["access_token"]}).status_code == 200
+    assert native_client.post("/api/v1/auth/login", json={"email": email, "password": "attacker123"}).status_code == 401
+    assert native_client.post("/api/v1/auth/verify", json={"token": old_token}).status_code == 400
+
+
+def test_embedded_runtime_stops_api_when_worker_exits(monkeypatch) -> None:
+    from app import runtime
+
+    monkeypatch.setattr(settings, "embedded_worker", True)
+    monkeypatch.setattr(settings, "job_backend", "rq")
+    monkeypatch.setattr(runtime.signal, "signal", lambda *args: None)
+    children = []
+
+    class Child:
+        def __init__(self, command):
+            self.command = command
+            self.exit_code = 1 if not children else None
+            self.terminated = False
+            children.append(self)
+
+        def poll(self):
+            return self.exit_code
+
+        def terminate(self):
+            self.terminated = True
+            self.exit_code = -15
+
+        def wait(self, timeout=None):
+            return self.exit_code
+
+    monkeypatch.setattr(runtime.subprocess, "Popen", Child)
+    assert runtime.main() == 1
+    assert children[1].terminated
+    assert settings.redis_url not in children[0].command
+
+
+def test_simultaneous_verification_consumes_token_once(native_client) -> None:
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+
+    from sqlalchemy import event
+
+    assert native_client.post("/api/v1/auth/register", json={
+        "email": "race@example.com", "password": "letters123",
+    }).status_code == 201
+    token = re.search(r"token=([\w-]+)", next(settings.mail_directory.glob("*.eml")).read_text()).group(1)
+    override = app.dependency_overrides[db_session]()
+    engine = next(override).get_bind()
+    override.close()
+    barrier = Barrier(2)
+
+    def both_read_token(connection, cursor, statement, parameters, context, executemany):
+        if statement.startswith("SELECT") and "WHERE users.email_verify_token_hash =" in statement:
+            barrier.wait(timeout=5)
+
+    event.listen(engine, "after_cursor_execute", both_read_token)
+    try:
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            results = list(executor.map(lambda _: native_client.post("/api/v1/auth/verify", json={"token": token}), range(2)))
+        assert sorted(response.status_code for response in results) == [200, 400]
+    finally:
+        event.remove(engine, "after_cursor_execute", both_read_token)
