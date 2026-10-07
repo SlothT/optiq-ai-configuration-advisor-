@@ -109,3 +109,13 @@ class Recommendation(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
 
     project: Mapped[Project] = relationship(back_populates="recommendations")
+
+
+class ProductFeedback(Base):
+    __tablename__ = "product_feedback"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=lambda: uuid4().hex)
+    page: Mapped[str] = mapped_column(String(100), nullable=False)
+    rating: Mapped[str] = mapped_column(String(20), nullable=False)
+    comment: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)

@@ -1,0 +1,119 @@
+# Managed public beta: one region, paid resources. Review costs before creating.
+envVarGroups:
+  - name: optiq-production
+    envVars:
+      - key: APP_ENV
+        value: production
+      - key: DEBUG
+        value: "false"
+      - key: JOB_BACKEND
+        value: rq
+      - key: MAIL_BACKEND
+        value: smtp
+      - key: JWT_SECRET
+        generateValue: true
+      - key: MLFLOW_TRACKING_URI
+        value: ""
+
+services:
+  - type: web
+    name: optiq-web
+    runtime: node
+    region: singapore
+    plan: 0.5c-512mb
+    rootDir: frontend
+    buildCommand: npm ci --no-audit --no-fund && npm run build
+    startCommand: npm run start -- --hostname 0.0.0.0 --port $PORT
+    healthCheckPath: /
+    envVars:
+      - key: NODE_VERSION
+        value: "22"
+      - key: NEXT_PUBLIC_API_URL
+        sync: false
+      - key: NEXT_TELEMETRY_DISABLED
+        value: "1"
+
+  - type: web
+    name: optiq-api
+    runtime: docker
+    region: singapore
+    plan: 0.5c-512mb
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: ./backend
+    healthCheckPath: /health/ready
+    envVars:
+      - fromGroup: optiq-production
+      - key: FERNET_KEY
+        sync: false
+      - key: FRONTEND_URL
+        sync: false
+      - key: SMTP_FROM
+        sync: false
+      - key: RESEND_API_KEY
+        sync: false
+      - key: DATABASE_URL
+        fromDatabase:
+          name: optiq-db
+          property: connectionString
+      - key: REDIS_URL
+        fromService:
+          type: keyvalue
+          name: optiq-queue
+          property: connectionString
+
+  - type: worker
+    name: optiq-worker
+    runtime: docker
+    region: singapore
+    plan: 0.5c-512mb
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: ./backend
+    dockerCommand: rq worker --url $REDIS_URL default
+    envVars:
+      - fromGroup: optiq-production
+      - key: FERNET_KEY
+        fromService:
+          type: web
+          name: optiq-api
+          envVarKey: FERNET_KEY
+      - key: FRONTEND_URL
+        fromService:
+          type: web
+          name: optiq-api
+          envVarKey: FRONTEND_URL
+      - key: SMTP_FROM
+        fromService:
+          type: web
+          name: optiq-api
+          envVarKey: SMTP_FROM
+      - key: RESEND_API_KEY
+        fromService:
+          type: web
+          name: optiq-api
+          envVarKey: RESEND_API_KEY
+      - key: DATABASE_URL
+        fromDatabase:
+          name: optiq-db
+          property: connectionString
+      - key: REDIS_URL
+        fromService:
+          type: keyvalue
+          name: optiq-queue
+          property: connectionString
+
+  - type: keyvalue
+    name: optiq-queue
+    region: singapore
+    plan: 256mb
+    maxmemoryPolicy: noeviction
+    persistenceMode: journal-snapshot
+    ipAllowList: []
+
+databases:
+  - name: optiq-db
+    region: singapore
+    plan: 0.1c-256mb
+    diskSizeGB: 1
+    databaseName: optiq
+    user: optiq
+    ipAllowList: []

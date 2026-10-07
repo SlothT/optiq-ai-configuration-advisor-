@@ -29,6 +29,12 @@ jobs:
         run: ./scripts/optiq check --build
         env:
           NEXT_TELEMETRY_DISABLED: "1"
+      - name: Validate free static frontend export
+        run: npm run build
+        working-directory: frontend
+        env:
+          NEXT_OUTPUT: export
+          NEXT_TELEMETRY_DISABLED: "1"
       - name: Validate Compose configuration
         run: docker compose --env-file .env -f infra/docker-compose.yml config --quiet
 

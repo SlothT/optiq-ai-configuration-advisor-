@@ -1,51 +1,72 @@
+# Free, small beta only. No paid database or separate worker is created.
+# External Postgres: paste a Neon connection string with sslmode=require.
 services:
+  - type: web
+    name: optiq-web
+    runtime: static
+    rootDir: frontend
+    buildCommand: npm ci --no-audit --no-fund && npm run build
+    staticPublishPath: ./out
+    headers:
+      - path: /*
+        name: Referrer-Policy
+        value: no-referrer
+      - path: /*
+        name: X-Content-Type-Options
+        value: nosniff
+      - path: /*
+        name: X-Frame-Options
+        value: DENY
+    envVars:
+      - key: NODE_VERSION
+        value: "22"
+      - key: NEXT_OUTPUT
+        value: export
+      - key: NEXT_PUBLIC_API_URL
+        sync: false
+      - key: NEXT_TELEMETRY_DISABLED
+        value: "1"
   - type: web
     name: optiq-api
     runtime: docker
+    region: singapore
+    plan: free
     dockerfilePath: ./backend/Dockerfile
     dockerContext: ./backend
-    healthCheckPath: /health
+    healthCheckPath: /health/ready
     envVars:
-      - key: PORT
-        value: 8000
-      - key: DATABASE_URL
-        sync: false
-      - key: REDIS_URL
-        sync: false
+      - key: APP_ENV
+        value: production
+      - key: DEBUG
+        value: "false"
+      - key: JOB_BACKEND
+        value: rq
+      - key: EMBEDDED_WORKER
+        value: "true"
+      - key: MAIL_BACKEND
+        value: smtp
       - key: JWT_SECRET
-        sync: false
+        generateValue: true
       - key: FERNET_KEY
         sync: false
       - key: FRONTEND_URL
         sync: false
-      - key: MLFLOW_TRACKING_URI
-        value: ""
-      - key: SMTP_HOST
-        sync: false
-      - key: SMTP_PORT
-        sync: false
-      - key: SMTP_USER
-        sync: false
-      - key: SMTP_PASSWORD
-        sync: false
       - key: SMTP_FROM
         sync: false
-      - key: SMTP_USE_TLS
-        value: "true"
-  - type: worker
-    name: optiq-worker
-    runtime: docker
-    dockerfilePath: ./backend/Dockerfile
-    dockerContext: ./backend
-    dockerCommand: rq worker --url $REDIS_URL default
-    envVars:
-      - fromService:
-          type: web
-          name: optiq-api
-          envVarKey: DATABASE_URL
+      - key: BREVO_API_KEY
+        sync: false
+      - key: DATABASE_URL
+        sync: false
+      - key: MLFLOW_TRACKING_URI
+        value: ""
       - key: REDIS_URL
-        sync: false
-      - key: JWT_SECRET
-        sync: false
-      - key: FERNET_KEY
-        sync: false
+        fromService:
+          type: keyvalue
+          name: optiq-queue
+          property: connectionString
+  - type: keyvalue
+    name: optiq-queue
+    region: singapore
+    plan: free
+    maxmemoryPolicy: noeviction
+    ipAllowList: []

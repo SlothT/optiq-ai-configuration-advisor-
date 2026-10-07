@@ -78,8 +78,7 @@ export function GoogleSignIn({ label }: { label: "signin" | "signup" }) {
   if (!clientId) {
     return (
       <p className="text-xs text-ink/50">
-        Google sign-in is optional. Add <code>NEXT_PUBLIC_GOOGLE_CLIENT_ID</code> in <code>frontend/.env.local</code> and{" "}
-        <code>GOOGLE_CLIENT_ID</code> in the API <code>.env</code> to enable it.
+        Google sign-in is not available yet. You can use email and password instead.
       </p>
     );
   }
